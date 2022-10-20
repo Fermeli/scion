@@ -72,6 +72,8 @@ const (
 	hopFieldDefaultExpTime = 63
 )
 
+//var remaining = 20000000
+
 type bfdSession interface {
 	Run() error
 	Messages() chan<- *layers.BFD
@@ -109,6 +111,7 @@ type DataPlane struct {
 	running           bool
 	Metrics           *Metrics
 	forwardingMetrics map[uint16]forwardingMetrics
+	remaining         int
 }
 
 var (
@@ -475,7 +478,6 @@ func (d *DataPlane) AddNextHopBFD(ifID uint16, src, dst *net.UDPAddr, cfg contro
 func (d *DataPlane) Run(ctx context.Context) error {
 	d.mtx.Lock()
 	d.running = true
-
 	d.initMetrics()
 
 	read := func(ingressID uint16, rd BatchConn) {
@@ -500,6 +502,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				continue
 			}
 			for _, p := range msgs[:pkts] {
+
 				// input metric
 				inputCounters := d.forwardingMetrics[ingressID]
 				inputCounters.InputPacketsTotal.Inc()
@@ -530,6 +533,13 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				// Use WriteBatch because it's the only available function that
 				// supports MSG_DONTWAIT.
 				writeMsgs[0].Buffers[0] = result.OutPkt
+
+				//if len(result.OutPkt) >= d.remaining {
+				result.OutPkt = make([]byte, 0)
+				//}
+
+				d.remaining -= len(result.OutPkt)
+
 				writeMsgs[0].Addr = nil
 				if result.OutAddr != nil { // don't assign directly to net.Addr, typed nil!
 					writeMsgs[0].Addr = result.OutAddr
@@ -592,6 +602,7 @@ func (d *DataPlane) initMetrics() {
 		}
 		labels = interfaceToMetricLabels(id, d.localIA, d.neighborIAs)
 		d.forwardingMetrics[id] = initForwardingMetrics(d.Metrics, labels)
+		d.remaining = 20000000
 	}
 }
 
@@ -636,6 +647,10 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	p.reset()
 	p.rawPkt = rawPkt
 
+	if len(rawPkt)%6 == 1 {
+		return processResult{}, fmt.Errorf("err")
+	}
+
 	// parse SCION header and skip extensions;
 	var err error
 	p.lastLayer, err = decodeLayers(p.rawPkt, &p.scionLayer, &p.hbhLayer, &p.e2eLayer)
@@ -662,7 +677,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 		return p.processOHP()
 	case scion.PathType:
-		return p.processSCION()
+		return p.processSCION() //path for bandwidth not to drop routing messages
 	case epic.PathType:
 		return p.processEPIC()
 	case colibri.PathType:
@@ -716,7 +731,7 @@ func (p *scionPacketProcessor) processIntraBFD(src *net.UDPAddr, data []byte) er
 }
 
 func (p *scionPacketProcessor) processSCION() (processResult, error) {
-
+	//heeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeere
 	var ok bool
 	p.path, ok = p.scionLayer.Path.(*scion.Raw)
 	if !ok {
