@@ -1,8 +1,8 @@
 package ratelimiter
 
 import (
-	"code/tokenbucket"
 	"fmt"
+	"github.com/scionproto/scion/go/lib/ratelimiter/tokenbucket"
 	"time"
 )
 

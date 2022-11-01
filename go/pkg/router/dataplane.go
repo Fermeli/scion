@@ -23,6 +23,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+
+	//"math"
 	"math/big"
 	"net"
 	"strconv"
@@ -30,16 +32,18 @@ import (
 	"syscall"
 	"time"
 
+	//"os"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/scionproto/scion/go/lib/addr"
 	libcolibri "github.com/scionproto/scion/go/lib/colibri/dataplane"
 	"github.com/scionproto/scion/go/lib/common"
 	libepic "github.com/scionproto/scion/go/lib/epic"
 	"github.com/scionproto/scion/go/lib/log"
 	"github.com/scionproto/scion/go/lib/metrics"
+	"github.com/scionproto/scion/go/lib/ratelimiter/ratelimiter"
 	"github.com/scionproto/scion/go/lib/scrypto"
 	"github.com/scionproto/scion/go/lib/serrors"
 	"github.com/scionproto/scion/go/lib/slayers"
@@ -614,6 +618,11 @@ type processResult struct {
 }
 
 func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
+
+	ratelimiter := ratelimiter.NewRateLimiter()
+	ratelimiter.AddRatelimit("127.0.0.1", 1000000, 2000, time.Now())
+	//ratelimiter.SetBurstSizeAndRate("a", 20000000, 1000000)
+
 	return &scionPacketProcessor{
 		d:         d,
 		ingressID: ingressID,
@@ -623,6 +632,7 @@ func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
 			scionInput: make([]byte, path.MACBufferSize),
 			epicInput:  make([]byte, libepic.MACBufferSize),
 		},
+		ratelimiter: ratelimiter,
 	}
 }
 
@@ -646,10 +656,6 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 
 	p.reset()
 	p.rawPkt = rawPkt
-
-	if len(rawPkt)%6 == 1 {
-		return processResult{}, fmt.Errorf("err")
-	}
 
 	// parse SCION header and skip extensions;
 	var err error
@@ -677,6 +683,22 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 		return p.processOHP()
 	case scion.PathType:
+
+		//if srcAddr.IP.String() == "127.0.0.1" {
+		appliable := p.ratelimiter.Apply("127.0.0.1", int64(len(rawPkt)), time.Now())
+
+		if !appliable {
+			return processResult{}, serrors.WithCtx(unsupportedPathType, "type", pathType)
+		}
+
+		//}
+
+		/*if srcAddr.IP.String() == "127.0.0.7" {
+			f,_ := os.Create("/home/fermeli/EPFL/M3/Semester_project/address.txt")
+			f.WriteString(srcAddr.IP.String())
+			f.Sync()
+		}*/
+
 		return p.processSCION() //path for bandwidth not to drop routing messages
 	case epic.PathType:
 		return p.processEPIC()
@@ -731,6 +753,7 @@ func (p *scionPacketProcessor) processIntraBFD(src *net.UDPAddr, data []byte) er
 }
 
 func (p *scionPacketProcessor) processSCION() (processResult, error) {
+
 	//heeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeere
 	var ok bool
 	p.path, ok = p.scionLayer.Path.(*scion.Raw)
@@ -839,6 +862,8 @@ type scionPacketProcessor struct {
 	cachedMac []byte
 	// macBuffers avoid allocating memory during processing.
 	macBuffers macBuffers
+
+	ratelimiter ratelimiter.RateLimiter
 }
 
 // macBuffers are preallocated buffers for the in- and outputs of MAC functions.

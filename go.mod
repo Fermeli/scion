@@ -117,4 +117,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 )
 
+require github.com/scionproto/scion
+
+replace github.com/scionproto/scion/ => /home/fermeli/EPFL/M3/Semester_project/scion/
+
 go 1.17
