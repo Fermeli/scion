@@ -2,8 +2,9 @@ package ratelimiter
 
 import (
 	"fmt"
-	"github.com/scionproto/scion/go/lib/ratelimiter/tokenbucket"
 	"time"
+
+	"github.com/scionproto/scion/go/lib/ratelimiter/tokenbucket"
 )
 
 type RateLimiter struct {
@@ -114,4 +115,10 @@ func (r *RateLimiter) Apply(identifier string, pktLen int64, now time.Time) bool
 	now = time.Now()
 
 	return tokenBucket.Apply(pktLen, now)
+}
+
+// Contains return true if the identifier is contained in the map and false otherwise.
+func (r *RateLimiter) Contains(identifier string) bool {
+	_, keyPresent := r.buckets[identifier]
+	return keyPresent
 }

@@ -36,6 +36,8 @@ type Metrics struct {
 	SiblingBFDPacketsSent     *prometheus.CounterVec
 	SiblingBFDPacketsReceived *prometheus.CounterVec
 	SiblingBFDStateChanges    *prometheus.CounterVec
+	DroppedPacketsDueToRL     *prometheus.CounterVec
+	DroppedPacketsDueToDD     *prometheus.CounterVec
 }
 
 // NewMetrics initializes the metrics for the Border Router, and registers them
@@ -149,6 +151,20 @@ func NewMetrics() *Metrics {
 				Help: "Total number of BFD state changes for sibling router instances",
 			},
 			[]string{"sibling", "isd_as"},
+		),
+		DroppedPacketsDueToRL: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "dropped_packets_due_to_RL",
+				Help: "The number of packets that have been dropped due to rate limiting",
+			},
+			[]string{"interface", "isd_as", "neighbor_isd_as"},
+		),
+		DroppedPacketsDueToDD: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "dropped_packets_due_to_DD",
+				Help: "The number of packets that have been dropped due to duplicate detection",
+			},
+			[]string{"interface", "isd_as", "neighbor_isd_as"},
 		),
 	}
 }

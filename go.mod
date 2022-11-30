@@ -1,7 +1,6 @@
 module github.com/scionproto/scion
 
 require (
-	github.com/BurntSushi/toml v0.3.1
 	github.com/antlr/antlr4 v0.0.0-20181218183524-be58ebffde8e
 	github.com/bazelbuild/rules_go v0.29.0
 	github.com/buildkite/go-buildkite/v2 v2.8.1
@@ -12,6 +11,7 @@ require (
 	github.com/getkin/kin-openapi v0.80.0
 	github.com/go-chi/chi/v5 v5.0.2
 	github.com/go-chi/cors v1.1.1
+	github.com/golang-collections/go-datastructures v0.0.0-20150211160725-59788d5eb259
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.2
 	github.com/google/go-cmp v0.5.6
@@ -116,9 +116,5 @@ require (
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 )
-
-require github.com/scionproto/scion
-
-replace github.com/scionproto/scion/ => /home/fermeli/EPFL/M3/Semester_project/scion/
 
 go 1.17

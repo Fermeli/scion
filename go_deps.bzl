@@ -573,6 +573,12 @@ def go_deps():
         version = "v1.3.2",
     )
     go_repository(
+        name = "com_github_golang_collections_go_datastructures",
+        importpath = "github.com/golang-collections/go-datastructures",
+        sum = "h1:ZHJ7+IGpuOXtVf6Zk/a3WuHQgkC+vXwaqfUBDFwahtI=",
+        version = "v0.0.0-20150211160725-59788d5eb259",
+    )
+    go_repository(
         name = "com_github_golang_glog",
         importpath = "github.com/golang/glog",
         sum = "h1:VKtxabqXZkF25pY9ekfRL6a582T4P37/31XEstQ5p58=",

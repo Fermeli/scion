@@ -2,7 +2,10 @@ load("//lint:go.bzl", "go_library", "go_test")
 
 go_library(
     name = "go_default_library",
-    srcs = ["ratelimiter.go"],
+    srcs = [
+        "doc.go",
+        "ratelimiter.go",
+    ],
     importpath = "github.com/scionproto/scion/go/lib/ratelimiter/ratelimiter",
     visibility = ["//visibility:public"],
     deps = ["//go/lib/ratelimiter/tokenbucket:go_default_library"],
@@ -10,7 +13,6 @@ go_library(
 
 go_test(
     name = "go_default_test",
-    srcs = [
-        "ratelimiter_test.go",
-    ],
+    srcs = ["ratelimiter_test.go"],
+    embed = [":go_default_library"],
 )

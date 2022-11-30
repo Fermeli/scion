@@ -20,6 +20,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
@@ -38,6 +39,7 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/scionproto/scion/go/lib/addr"
+	"github.com/scionproto/scion/go/lib/bloomfilter"
 	libcolibri "github.com/scionproto/scion/go/lib/colibri/dataplane"
 	"github.com/scionproto/scion/go/lib/common"
 	libepic "github.com/scionproto/scion/go/lib/epic"
@@ -130,6 +132,8 @@ var (
 	noBFDSessionFound             = serrors.New("no BFD sessions was found")
 	noBFDSessionConfigured        = serrors.New("no BFD sessions have been configured")
 	errBFDDisabled                = serrors.New("BFD is disabled")
+	rateLimited                   = serrors.New("excessing rate limit")
+	duplicateDetected             = serrors.New("The packet is a duplicate")
 )
 
 type scmpError struct {
@@ -513,7 +517,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				inputCounters.InputBytesTotal.Add(float64(p.N))
 
 				srcAddr := p.Addr.(*net.UDPAddr)
-				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr)
+				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr, d.forwardingMetrics) //inputCounters)
 
 				switch {
 				case err == nil:
@@ -620,7 +624,9 @@ type processResult struct {
 func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
 
 	ratelimiter := ratelimiter.NewRateLimiter()
-	ratelimiter.AddRatelimit("127.0.0.1", 1000000, 2000, time.Now())
+	ratelimiter.AddRatelimit("1-ff00:0:110", 500000, 2000, time.Now())
+	bloomFilter := bloomfilter.NewOptimalSlidingBloomFilter(0.01, 11000000, 3*time.Second, time.Now(), 3)
+
 	//ratelimiter.SetBurstSizeAndRate("a", 20000000, 1000000)
 
 	return &scionPacketProcessor{
@@ -633,6 +639,7 @@ func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
 			epicInput:  make([]byte, libepic.MACBufferSize),
 		},
 		ratelimiter: ratelimiter,
+		bloomfilter: bloomFilter,
 	}
 }
 
@@ -652,7 +659,7 @@ func (p *scionPacketProcessor) reset() error {
 }
 
 func (p *scionPacketProcessor) processPkt(rawPkt []byte,
-	srcAddr *net.UDPAddr) (processResult, error) {
+	srcAddr *net.UDPAddr, forwardingMetrics map[uint16]forwardingMetrics) (processResult, error) {
 
 	p.reset()
 	p.rawPkt = rawPkt
@@ -683,26 +690,54 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 		return p.processOHP()
 	case scion.PathType:
+		address := p.scionLayer.SrcIA
+		stringAddress := address.String()
 
-		//if srcAddr.IP.String() == "127.0.0.1" {
-		appliable := p.ratelimiter.Apply("127.0.0.1", int64(len(rawPkt)), time.Now())
+		if stringAddress == "1-ff00:0:110" {
 
-		if !appliable {
-			return processResult{}, serrors.WithCtx(unsupportedPathType, "type", pathType)
+			appliable := p.ratelimiter.Apply(stringAddress, int64(len(rawPkt)), time.Now())
+			if !appliable {
+				res, err := p.processSCION()
+
+				if err != nil {
+					return processResult{}, err
+				}
+				forwardingMetrics[res.EgressID].DroppedPacketsDueToRL.Inc()
+				return processResult{}, rateLimited
+			}
 		}
 
-		//}
-
-		/*if srcAddr.IP.String() == "127.0.0.7" {
-			f,_ := os.Create("/home/fermeli/EPFL/M3/Semester_project/address.txt")
-			f.WriteString(srcAddr.IP.String())
-			f.Sync()
-		}*/
-
-		return p.processSCION() //path for bandwidth not to drop routing messages
+		return p.processSCION()
 	case epic.PathType:
 		return p.processEPIC()
 	case colibri.PathType:
+		address := p.scionLayer.SrcIA
+		byteAddress := make([]byte, 4)
+		binary.LittleEndian.PutUint16(byteAddress, uint16(address))
+		path, ok := p.scionLayer.Path.(*colibri.ColibriPath)
+
+		if !ok {
+			return processResult{}, malformedPath
+		}
+
+		packetIdentifier := append(append(byteAddress, path.PacketTimestamp[:]...), path.InfoField.ResIdSuffix...)
+		duplicatedPacket, err := p.bloomfilter.HasBeenSeen(packetIdentifier, time.Now())
+
+		if err != nil {
+			return processResult{}, err
+		}
+
+		if duplicatedPacket {
+			res, err := p.processCOLIBRI()
+
+			if err != nil {
+				return processResult{}, err
+			}
+
+			forwardingMetrics[res.EgressID].DroppedPacketsDueToDD.Inc()
+			return processResult{}, duplicateDetected
+		}
+
 		return p.processCOLIBRI()
 	default:
 		return processResult{}, serrors.WithCtx(unsupportedPathType, "type", pathType)
@@ -864,6 +899,8 @@ type scionPacketProcessor struct {
 	macBuffers macBuffers
 
 	ratelimiter ratelimiter.RateLimiter
+
+	bloomfilter bloomfilter.SlidingBloomFilter
 }
 
 // macBuffers are preallocated buffers for the in- and outputs of MAC functions.
@@ -1633,26 +1670,32 @@ func nextHdr(layer gopacket.DecodingLayer) common.L4ProtocolType {
 // forwardingMetrics contains the subset of Metrics relevant for forwarding,
 // instantiated with some interface-specific labels.
 type forwardingMetrics struct {
-	InputBytesTotal     prometheus.Counter
-	OutputBytesTotal    prometheus.Counter
-	InputPacketsTotal   prometheus.Counter
-	OutputPacketsTotal  prometheus.Counter
-	DroppedPacketsTotal prometheus.Counter
+	InputBytesTotal       prometheus.Counter
+	OutputBytesTotal      prometheus.Counter
+	InputPacketsTotal     prometheus.Counter
+	OutputPacketsTotal    prometheus.Counter
+	DroppedPacketsTotal   prometheus.Counter
+	DroppedPacketsDueToRL prometheus.Counter
+	DroppedPacketsDueToDD prometheus.Counter
 }
 
 func initForwardingMetrics(metrics *Metrics, labels prometheus.Labels) forwardingMetrics {
 	c := forwardingMetrics{
-		InputBytesTotal:     metrics.InputBytesTotal.With(labels),
-		InputPacketsTotal:   metrics.InputPacketsTotal.With(labels),
-		OutputBytesTotal:    metrics.OutputBytesTotal.With(labels),
-		OutputPacketsTotal:  metrics.OutputPacketsTotal.With(labels),
-		DroppedPacketsTotal: metrics.DroppedPacketsTotal.With(labels),
+		InputBytesTotal:       metrics.InputBytesTotal.With(labels),
+		InputPacketsTotal:     metrics.InputPacketsTotal.With(labels),
+		OutputBytesTotal:      metrics.OutputBytesTotal.With(labels),
+		OutputPacketsTotal:    metrics.OutputPacketsTotal.With(labels),
+		DroppedPacketsTotal:   metrics.DroppedPacketsTotal.With(labels),
+		DroppedPacketsDueToRL: metrics.DroppedPacketsDueToRL.With(labels),
+		DroppedPacketsDueToDD: metrics.DroppedPacketsDueToDD.With(labels),
 	}
 	c.InputBytesTotal.Add(0)
 	c.InputPacketsTotal.Add(0)
 	c.OutputBytesTotal.Add(0)
 	c.OutputPacketsTotal.Add(0)
 	c.DroppedPacketsTotal.Add(0)
+	c.DroppedPacketsDueToRL.Add(0)
+	c.DroppedPacketsDueToDD.Add(0)
 	return c
 }
 
