@@ -102,22 +102,22 @@ type BatchConn interface {
 // Currently, only the following features are supported:
 //  - initializing connections; MUST be done prior to calling Run
 type DataPlane struct {
-	external          map[uint16]BatchConn
-	linkTypes         map[uint16]topology.LinkType
-	neighborIAs       map[uint16]addr.IA
-	internal          BatchConn
-	internalIP        net.IP
-	internalNextHops  map[uint16]*net.UDPAddr
-	svc               *services
-	macFactory        func() hash.Hash
-	colibriKey        cipher.Block
-	bfdSessions       map[uint16]bfdSession
-	localIA           addr.IA
-	mtx               sync.Mutex
-	running           bool
-	Metrics           *Metrics
-	forwardingMetrics map[uint16]forwardingMetrics
-	remaining         int
+	external                 map[uint16]BatchConn
+	linkTypes                map[uint16]topology.LinkType
+	neighborIAs              map[uint16]addr.IA
+	internal                 BatchConn
+	internalIP               net.IP
+	internalNextHops         map[uint16]*net.UDPAddr
+	svc                      *services
+	macFactory               func() hash.Hash
+	colibriKey               cipher.Block
+	bfdSessions              map[uint16]bfdSession
+	localIA                  addr.IA
+	mtx                      sync.Mutex
+	running                  bool
+	Metrics                  *Metrics
+	forwardingMetrics        map[uint16]forwardingMetrics
+	trafficMonitoringMetrics map[string]trafficMonitoringMetrics
 }
 
 var (
@@ -517,7 +517,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				inputCounters.InputBytesTotal.Add(float64(p.N))
 
 				srcAddr := p.Addr.(*net.UDPAddr)
-				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr, d.forwardingMetrics) //inputCounters)
+				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr, d.trafficMonitoringMetrics) //inputCounters)
 
 				switch {
 				case err == nil:
@@ -542,11 +542,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				// supports MSG_DONTWAIT.
 				writeMsgs[0].Buffers[0] = result.OutPkt
 
-				//if len(result.OutPkt) >= d.remaining {
 				result.OutPkt = make([]byte, 0)
-				//}
-
-				d.remaining -= len(result.OutPkt)
 
 				writeMsgs[0].Addr = nil
 				if result.OutAddr != nil { // don't assign directly to net.Addr, typed nil!
@@ -601,7 +597,9 @@ func (d *DataPlane) Run(ctx context.Context) error {
 // counters are already instantiated for all the relevant interfaces so this
 // will not have to be repeated during packet forwarding.
 func (d *DataPlane) initMetrics() {
+	addressesToRateLimit := []string{"1-ff00:0:110"}
 	d.forwardingMetrics = make(map[uint16]forwardingMetrics)
+	d.trafficMonitoringMetrics = make(map[string]trafficMonitoringMetrics)
 	labels := interfaceToMetricLabels(0, d.localIA, d.neighborIAs)
 	d.forwardingMetrics[0] = initForwardingMetrics(d.Metrics, labels)
 	for id := range d.external {
@@ -610,7 +608,17 @@ func (d *DataPlane) initMetrics() {
 		}
 		labels = interfaceToMetricLabels(id, d.localIA, d.neighborIAs)
 		d.forwardingMetrics[id] = initForwardingMetrics(d.Metrics, labels)
-		d.remaining = 20000000
+	}
+
+	for _, address := range addressesToRateLimit {
+		if address != d.localIA.String() {
+			labels = prometheus.Labels{
+				"isd_as":     d.localIA.String(),
+				"scr_isd_as": address,
+			}
+			d.trafficMonitoringMetrics[address] = initTrafficMonitoringMetrics(d.Metrics, labels)
+		}
+
 	}
 }
 
@@ -659,7 +667,7 @@ func (p *scionPacketProcessor) reset() error {
 }
 
 func (p *scionPacketProcessor) processPkt(rawPkt []byte,
-	srcAddr *net.UDPAddr, forwardingMetrics map[uint16]forwardingMetrics) (processResult, error) {
+	srcAddr *net.UDPAddr, trafficMonitoringMetrics map[string]trafficMonitoringMetrics) (processResult, error) {
 
 	p.reset()
 	p.rawPkt = rawPkt
@@ -697,13 +705,13 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 
 			appliable := p.ratelimiter.Apply(stringAddress, int64(len(rawPkt)), time.Now())
 			if !appliable {
-				res, err := p.processSCION()
 
-				if err != nil {
-					return processResult{}, err
+				metrics, ok := trafficMonitoringMetrics["1-ff00:0:110"]
+
+				if ok {
+					metrics.DroppedPacketsDueToRL.Inc()
+					return processResult{}, rateLimited
 				}
-				forwardingMetrics[res.EgressID].DroppedPacketsDueToRL.Inc()
-				return processResult{}, rateLimited
 			}
 		}
 
@@ -728,14 +736,14 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 
 		if duplicatedPacket {
-			res, err := p.processCOLIBRI()
 
-			if err != nil {
-				return processResult{}, err
+			metrics, ok := trafficMonitoringMetrics["1-ff00:0:110"]
+
+			if ok {
+				metrics.DroppedPacketsDueToDD.Inc()
+				return processResult{}, duplicateDetected
 			}
 
-			forwardingMetrics[res.EgressID].DroppedPacketsDueToDD.Inc()
-			return processResult{}, duplicateDetected
 		}
 
 		return p.processCOLIBRI()
@@ -1670,30 +1678,42 @@ func nextHdr(layer gopacket.DecodingLayer) common.L4ProtocolType {
 // forwardingMetrics contains the subset of Metrics relevant for forwarding,
 // instantiated with some interface-specific labels.
 type forwardingMetrics struct {
-	InputBytesTotal       prometheus.Counter
-	OutputBytesTotal      prometheus.Counter
-	InputPacketsTotal     prometheus.Counter
-	OutputPacketsTotal    prometheus.Counter
-	DroppedPacketsTotal   prometheus.Counter
+	InputBytesTotal     prometheus.Counter
+	OutputBytesTotal    prometheus.Counter
+	InputPacketsTotal   prometheus.Counter
+	OutputPacketsTotal  prometheus.Counter
+	DroppedPacketsTotal prometheus.Counter
+}
+
+// forwardingMetrics contains the subset of Metrics relevant for traffic
+// monitoring, instantiated with some AS-specific labels.
+type trafficMonitoringMetrics struct {
 	DroppedPacketsDueToRL prometheus.Counter
 	DroppedPacketsDueToDD prometheus.Counter
 }
 
 func initForwardingMetrics(metrics *Metrics, labels prometheus.Labels) forwardingMetrics {
 	c := forwardingMetrics{
-		InputBytesTotal:       metrics.InputBytesTotal.With(labels),
-		InputPacketsTotal:     metrics.InputPacketsTotal.With(labels),
-		OutputBytesTotal:      metrics.OutputBytesTotal.With(labels),
-		OutputPacketsTotal:    metrics.OutputPacketsTotal.With(labels),
-		DroppedPacketsTotal:   metrics.DroppedPacketsTotal.With(labels),
-		DroppedPacketsDueToRL: metrics.DroppedPacketsDueToRL.With(labels),
-		DroppedPacketsDueToDD: metrics.DroppedPacketsDueToDD.With(labels),
+		InputBytesTotal:     metrics.InputBytesTotal.With(labels),
+		InputPacketsTotal:   metrics.InputPacketsTotal.With(labels),
+		OutputBytesTotal:    metrics.OutputBytesTotal.With(labels),
+		OutputPacketsTotal:  metrics.OutputPacketsTotal.With(labels),
+		DroppedPacketsTotal: metrics.DroppedPacketsTotal.With(labels),
 	}
 	c.InputBytesTotal.Add(0)
 	c.InputPacketsTotal.Add(0)
 	c.OutputBytesTotal.Add(0)
 	c.OutputPacketsTotal.Add(0)
 	c.DroppedPacketsTotal.Add(0)
+	return c
+}
+
+func initTrafficMonitoringMetrics(metrics *Metrics, labels prometheus.Labels) trafficMonitoringMetrics {
+	c := trafficMonitoringMetrics{
+		DroppedPacketsDueToRL: metrics.DroppedPacketsDueToRL.With(labels),
+		DroppedPacketsDueToDD: metrics.DroppedPacketsDueToDD.With(labels),
+	}
+
 	c.DroppedPacketsDueToRL.Add(0)
 	c.DroppedPacketsDueToDD.Add(0)
 	return c

@@ -157,14 +157,14 @@ func NewMetrics() *Metrics {
 				Name: "dropped_packets_due_to_RL",
 				Help: "The number of packets that have been dropped due to rate limiting",
 			},
-			[]string{"interface", "isd_as", "neighbor_isd_as"},
+			[]string{"isd_as", "scr_isd_as"},
 		),
 		DroppedPacketsDueToDD: promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dropped_packets_due_to_DD",
 				Help: "The number of packets that have been dropped due to duplicate detection",
 			},
-			[]string{"interface", "isd_as", "neighbor_isd_as"},
+			[]string{"isd_as", "scr_isd_as"},
 		),
 	}
 }

@@ -23,7 +23,7 @@ func NewRateLimiter() RateLimiter {
 func (r *RateLimiter) Clear() {
 	r.buckets = make(map[string]*tokenbucket.TokenBucket)
 }
-
+ 
 // AddRatelimit adds a new identifier and initializes the fields of its bucket
 func (r *RateLimiter) AddRatelimit(identifier string, rate float64, cbs int64, now time.Time) {
 	newTokenBucket := tokenbucket.NewTokenBucket(now, cbs, rate)
