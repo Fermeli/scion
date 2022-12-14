@@ -78,8 +78,6 @@ const (
 	hopFieldDefaultExpTime = 63
 )
 
-//var remaining = 20000000
-
 type bfdSession interface {
 	Run() error
 	Messages() chan<- *layers.BFD
@@ -92,6 +90,13 @@ type BatchConn interface {
 	WriteTo([]byte, *net.UDPAddr) (int, error)
 	WriteBatch(msgs underlayconn.Messages, flags int) (int, error)
 	Close() error
+}
+
+// syncRateLimiter is a rate limiter that can be locked to avoid data races
+// check go/lib/ratelimiter/ratelimiter/ratelimiter.go for doc
+type syncRateLimiter struct {
+	sync.Mutex
+	Ratelimiter ratelimiter.RateLimiter
 }
 
 // DataPlane contains a SCION Border Router's forwarding logic. It reads packets
@@ -118,6 +123,7 @@ type DataPlane struct {
 	Metrics                  *Metrics
 	forwardingMetrics        map[uint16]forwardingMetrics
 	trafficMonitoringMetrics map[string]trafficMonitoringMetrics
+	SyncRateLimiter          syncRateLimiter
 }
 
 var (
@@ -487,6 +493,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 	d.mtx.Lock()
 	d.running = true
 	d.initMetrics()
+	d.SyncRateLimiter.Ratelimiter = ratelimiter.NewRateLimiter()
 
 	read := func(ingressID uint16, rd BatchConn) {
 
@@ -517,7 +524,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				inputCounters.InputBytesTotal.Add(float64(p.N))
 
 				srcAddr := p.Addr.(*net.UDPAddr)
-				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr, d.trafficMonitoringMetrics) //inputCounters)
+				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr) //inputCounters)
 
 				switch {
 				case err == nil:
@@ -667,7 +674,7 @@ func (p *scionPacketProcessor) reset() error {
 }
 
 func (p *scionPacketProcessor) processPkt(rawPkt []byte,
-	srcAddr *net.UDPAddr, trafficMonitoringMetrics map[string]trafficMonitoringMetrics) (processResult, error) {
+	srcAddr *net.UDPAddr) (processResult, error) {
 
 	p.reset()
 	p.rawPkt = rawPkt
@@ -700,13 +707,13 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	case scion.PathType:
 		address := p.scionLayer.SrcIA
 		stringAddress := address.String()
-
-		if stringAddress == "1-ff00:0:110" {
-
-			appliable := p.ratelimiter.Apply(stringAddress, int64(len(rawPkt)), time.Now())
+		p.d.SyncRateLimiter.Lock()
+		defer p.d.SyncRateLimiter.Unlock()
+		if p.d.SyncRateLimiter.Ratelimiter.Contains(stringAddress) {
+			appliable := p.d.SyncRateLimiter.Ratelimiter.Apply(stringAddress, int64(len(rawPkt)), time.Now())
 			if !appliable {
 
-				metrics, ok := trafficMonitoringMetrics["1-ff00:0:110"]
+				metrics, ok := p.d.trafficMonitoringMetrics[stringAddress]
 
 				if ok {
 					metrics.DroppedPacketsDueToRL.Inc()
@@ -737,7 +744,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 
 		if duplicatedPacket {
 
-			metrics, ok := trafficMonitoringMetrics["1-ff00:0:110"]
+			metrics, ok := p.d.trafficMonitoringMetrics["1-ff00:0:110"]
 
 			if ok {
 				metrics.DroppedPacketsDueToDD.Inc()

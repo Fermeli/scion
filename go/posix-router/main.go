@@ -19,18 +19,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
 
 	"github.com/scionproto/scion/go/lib/log"
 	"github.com/scionproto/scion/go/lib/serrors"
 	"github.com/scionproto/scion/go/lib/topology"
 	"github.com/scionproto/scion/go/pkg/app"
 	"github.com/scionproto/scion/go/pkg/app/launcher"
+	colgrpc "github.com/scionproto/scion/go/pkg/co/colibri/grpc"
+	colpb "github.com/scionproto/scion/go/pkg/proto/colibri"
 	"github.com/scionproto/scion/go/pkg/router"
 	"github.com/scionproto/scion/go/pkg/router/api"
 	"github.com/scionproto/scion/go/pkg/router/config"
@@ -39,6 +44,60 @@ import (
 )
 
 var globalCfg config.Config
+
+type rateLimitingServer struct {
+	colgrpc.UnimplementedRateLimiterServiceServer
+	dp *router.DataPlane
+}
+
+func (r *rateLimitingServer) AddRateLimit(ctx context.Context, req *colpb.AddRateLimitRequest) (*colpb.Success, error) {
+	r.dp.SyncRateLimiter.Lock()
+	defer r.dp.SyncRateLimiter.Unlock()
+	r.dp.SyncRateLimiter.Ratelimiter.AddRatelimit(req.Identifier, req.Rate, req.Cbs, time.Now())
+	return &colpb.Success{}, nil
+}
+
+func (r *rateLimitingServer) GetBurstSize(ctx context.Context, req *colpb.GetterForIdentifierRequest) (*colpb.GetBurstSizeResponse, error) {
+	r.dp.SyncRateLimiter.Lock()
+	defer r.dp.SyncRateLimiter.Unlock()
+	cbs, err := r.dp.SyncRateLimiter.Ratelimiter.GetBurstSize(req.Identifier)
+	return &colpb.GetBurstSizeResponse{Cbs: cbs}, err
+}
+
+func (r *rateLimitingServer) GetBurstSizeAndRate(ctx context.Context, req *colpb.GetterForIdentifierRequest) (*colpb.GetBurstSizeAndRateResponse, error) {
+	r.dp.SyncRateLimiter.Lock()
+	defer r.dp.SyncRateLimiter.Unlock()
+	cbs, rate, err := r.dp.SyncRateLimiter.Ratelimiter.GetBurstSizeAndRate(req.Identifier)
+	return &colpb.GetBurstSizeAndRateResponse{Cbs: cbs, Rate: rate}, err
+}
+
+func (r *rateLimitingServer) GetRate(ctx context.Context, req *colpb.GetterForIdentifierRequest) (*colpb.GetRateResponse, error) {
+	r.dp.SyncRateLimiter.Lock()
+	defer r.dp.SyncRateLimiter.Unlock()
+	rate, err := r.dp.SyncRateLimiter.Ratelimiter.GetRate(req.Identifier)
+	return &colpb.GetRateResponse{Rate: rate}, err
+}
+
+func (r *rateLimitingServer) SetBurstSize(ctx context.Context, req *colpb.SetBurstSizeRequest) (*colpb.Success, error) {
+	r.dp.SyncRateLimiter.Lock()
+	defer r.dp.SyncRateLimiter.Unlock()
+	err := r.dp.SyncRateLimiter.Ratelimiter.SetBurstSize(req.Identifier, req.Cbs)
+	return &colpb.Success{}, err
+}
+
+func (r *rateLimitingServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.SetBurstSizeAndRateRequest) (*colpb.Success, error) {
+	r.dp.SyncRateLimiter.Lock()
+	defer r.dp.SyncRateLimiter.Unlock()
+	err := r.dp.SyncRateLimiter.Ratelimiter.SetBurstSizeAndRate(req.Identifier, req.Cbs, req.Rate)
+	return &colpb.Success{}, err
+}
+
+func (r *rateLimitingServer) SetRate(ctx context.Context, req *colpb.SetRateRequest) (*colpb.Success, error) {
+	r.dp.SyncRateLimiter.Lock()
+	defer r.dp.SyncRateLimiter.Unlock()
+	err := r.dp.SyncRateLimiter.Ratelimiter.SetRate(req.Identifier, req.Rate)
+	return &colpb.Success{}, err
+}
 
 func main() {
 	application := launcher.Application{
@@ -126,6 +185,16 @@ func realMain(ctx context.Context) error {
 		}
 		return nil
 	})
+
+	lis, err := net.Listen("tcp", "localhost:5045")
+	if err != nil {
+		return serrors.WrapStr("failed to listen:", err)
+	}
+	var opts []grpc.ServerOption
+	rateLimitingServer := rateLimitingServer{dp: &dp.DataPlane}
+	grpcServer := grpc.NewServer(opts...)
+	colgrpc.RegisterRateLimiterServiceServer(grpcServer, &rateLimitingServer)
+	grpcServer.Serve(lis)
 
 	return g.Wait()
 }
