@@ -2,8 +2,9 @@ package ratelimiter
 
 import (
 	"fmt"
-	"github.com/scionproto/scion/go/lib/ratelimiter/tokenbucket"
 	"time"
+
+	"github.com/scionproto/scion/go/lib/ratelimiter/tokenbucket"
 )
 
 type RateLimiter struct {
@@ -22,7 +23,7 @@ func NewRateLimiter() RateLimiter {
 func (r *RateLimiter) Clear() {
 	r.buckets = make(map[string]*tokenbucket.TokenBucket)
 }
-
+ 
 // AddRatelimit adds a new identifier and initializes the fields of its bucket
 func (r *RateLimiter) AddRatelimit(identifier string, rate float64, cbs int64, now time.Time) {
 	newTokenBucket := tokenbucket.NewTokenBucket(now, cbs, rate)
@@ -114,4 +115,10 @@ func (r *RateLimiter) Apply(identifier string, pktLen int64, now time.Time) bool
 	now = time.Now()
 
 	return tokenBucket.Apply(pktLen, now)
+}
+
+// Contains return true if the identifier is contained in the map and false otherwise.
+func (r *RateLimiter) Contains(identifier string) bool {
+	_, keyPresent := r.buckets[identifier]
+	return keyPresent
 }
