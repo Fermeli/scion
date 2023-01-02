@@ -89,6 +89,35 @@ func realMain(ctx context.Context, cfg *config.Config) error {
 		<-errCtx.Done()
 		return cleanup.Do()
 	})
+
+	g.Go(func() error {
+		var opts []grpc.DialOption
+
+		conn, err := grpc.Dial("localhost:5045", opts...)
+		if err != nil {
+			return nil
+		}
+
+		if len(opts) == 0 {
+			return err
+		}
+
+		defer conn.Close()
+		client := colpb.NewRateLimiterServiceClient(conn)
+		address := "1-ff00:0:110"
+		_, err = client.AddRateLimit(context.Background(), &colpb.AddRateLimitRequest{Identifier: address, Cbs: 2000, Rate: 500000})
+
+		if err != nil {
+			return err
+		}
+
+		time.Sleep(1 * time.Minute)
+
+		_, err = client.SetBurstSize(context.Background(), &colpb.SetBurstSizeRequest{Identifier: address, Cbs: -1})
+
+		return nil
+	})
+
 	return g.Wait()
 }
 
