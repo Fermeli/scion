@@ -53,31 +53,64 @@ type rateLimiterServer struct {
 }
 
 func (r *rateLimiterServer) AddRateLimit(ctx context.Context, req *colpb.AddRateLimitRequest) (*colpb.Success, error) {
-	r.dp.SyncRateLimiter.Lock()
-	defer r.dp.SyncRateLimiter.Unlock()
-	r.dp.SyncRateLimiter.Ratelimiter.AddRatelimit(req.Identifier, req.Rate, req.Cbs, time.Now())
+	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
+	if !ok {
+		r.dp.InitRateLimiter(uint16(req.Ingress))
+		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+	}
+
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+
+	rateLimiter.Ratelimiter.AddRatelimit(buildIdentifier(uint16(req.Egress), req.Address), req.Rate, req.Cbs, time.Now())
 	return &colpb.Success{}, nil
 }
 
 func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurstSizeRequest) (*colpb.Success, error) {
-	r.dp.SyncRateLimiter.Lock()
-	defer r.dp.SyncRateLimiter.Unlock()
-	err := r.dp.SyncRateLimiter.Ratelimiter.SetBurstSize(req.Identifier, req.Cbs)
+	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
+	if !ok {
+		r.dp.InitRateLimiter(uint16(req.Ingress))
+		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+	}
+
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+	err := rateLimiter.Ratelimiter.SetBurstSize(buildIdentifier(uint16(req.Egress), req.Address), req.Cbs)
 	return &colpb.Success{}, err
 }
 
 func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.SetBurstSizeAndRateRequest) (*colpb.Success, error) {
-	r.dp.SyncRateLimiter.Lock()
-	defer r.dp.SyncRateLimiter.Unlock()
-	err := r.dp.SyncRateLimiter.Ratelimiter.SetBurstSizeAndRate(req.Identifier, req.Cbs, req.Rate)
+	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
+	if !ok {
+		r.dp.InitRateLimiter(uint16(req.Ingress))
+		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+	}
+
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+	err := rateLimiter.Ratelimiter.SetBurstSizeAndRate(buildIdentifier(uint16(req.Egress), req.Address), req.Cbs, req.Rate)
 	return &colpb.Success{}, err
 }
 
 func (r *rateLimiterServer) SetRate(ctx context.Context, req *colpb.SetRateRequest) (*colpb.Success, error) {
-	r.dp.SyncRateLimiter.Lock()
-	defer r.dp.SyncRateLimiter.Unlock()
-	err := r.dp.SyncRateLimiter.Ratelimiter.SetRate(req.Identifier, req.Rate)
+	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
+	if !ok {
+		r.dp.InitRateLimiter(uint16(req.Ingress))
+		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+	}
+
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+	err := rateLimiter.Ratelimiter.SetRate(buildIdentifier(uint16(req.Egress), req.Address), req.Rate)
 	return &colpb.Success{}, err
+}
+
+func buildIdentifier(egress uint16, address string) string {
+	return fmt.Sprintf("%s-%d", address, egress)
 }
 
 func main() {

@@ -31,31 +31,34 @@ service RateLimiterService {
 // /////////////////////////////////////////////////
 
 message AddRateLimitRequest {
-    string identifier = 1;
+    string address = 1;
     double rate = 2;
     int64 cbs = 3;
+    int32 ingress = 4;
+    int32 egress = 5;
 }
 
 message Success {
 }
 
 message SetBurstSizeRequest {
-    string identifier = 1;
+    string address = 1;
     int64 cbs = 2;
+    int32 ingress = 3;
+    int32 egress = 4;
 }
 
 message SetRateRequest {
-    string identifier = 1;
+    string address = 1;
     double rate = 2;
+    int32 ingress = 3;
+    int32 egress = 4;
 }
 
 message SetBurstSizeAndRateRequest {
-    string identifier = 1;
+    string address = 1;
     int64 cbs = 2;
     double rate = 3;
-}
-
-message GetBurstSizeAndRateResponse {
-    int64 cbs = 1;
-    double rate = 2;
+    int32 ingress = 4;
+    int32 egress = 5;
 }

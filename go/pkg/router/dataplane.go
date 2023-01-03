@@ -33,8 +33,6 @@ import (
 	"syscall"
 	"time"
 
-	//"os"
-
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/prometheus/client_golang/prometheus"
@@ -123,7 +121,7 @@ type DataPlane struct {
 	Metrics                  *Metrics
 	forwardingMetrics        map[uint16]forwardingMetrics
 	trafficMonitoringMetrics map[string]trafficMonitoringMetrics
-	SyncRateLimiter          syncRateLimiter
+	SyncRateLimiters         map[uint16]*syncRateLimiter
 }
 
 var (
@@ -493,8 +491,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 	d.mtx.Lock()
 	d.running = true
 	d.initMetrics()
-	d.SyncRateLimiter.Ratelimiter = ratelimiter.NewRateLimiter()
-
+	d.SyncRateLimiters = make(map[uint16]*syncRateLimiter)
 	read := func(ingressID uint16, rd BatchConn) {
 
 		msgs := conn.NewReadMessages(inputBatchCnt)
@@ -604,7 +601,6 @@ func (d *DataPlane) Run(ctx context.Context) error {
 // counters are already instantiated for all the relevant interfaces so this
 // will not have to be repeated during packet forwarding.
 func (d *DataPlane) initMetrics() {
-	addressesToRateLimit := []string{"1-ff00:0:110"}
 	d.forwardingMetrics = make(map[uint16]forwardingMetrics)
 	d.trafficMonitoringMetrics = make(map[string]trafficMonitoringMetrics)
 	labels := interfaceToMetricLabels(0, d.localIA, d.neighborIAs)
@@ -616,17 +612,11 @@ func (d *DataPlane) initMetrics() {
 		labels = interfaceToMetricLabels(id, d.localIA, d.neighborIAs)
 		d.forwardingMetrics[id] = initForwardingMetrics(d.Metrics, labels)
 	}
+}
 
-	for _, address := range addressesToRateLimit {
-		if address != d.localIA.String() {
-			labels = prometheus.Labels{
-				"isd_as":     d.localIA.String(),
-				"scr_isd_as": address,
-			}
-			d.trafficMonitoringMetrics[address] = initTrafficMonitoringMetrics(d.Metrics, labels)
-		}
-
-	}
+// InitRateLimiter initializes the rate limiter for the given ingressID
+func (d *DataPlane) InitRateLimiter(ingressID uint16) {
+	d.SyncRateLimiters[ingressID] = &syncRateLimiter{Ratelimiter: ratelimiter.NewRateLimiter()}
 }
 
 type processResult struct {
@@ -705,24 +695,47 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 		return p.processOHP()
 	case scion.PathType:
-		address := p.scionLayer.SrcIA
-		stringAddress := address.String()
-		p.d.SyncRateLimiter.Lock()
-		defer p.d.SyncRateLimiter.Unlock()
-		if p.d.SyncRateLimiter.Ratelimiter.Contains(stringAddress) {
-			appliable := p.d.SyncRateLimiter.Ratelimiter.Apply(stringAddress, int64(len(rawPkt)), time.Now())
-			if !appliable {
+		res, err := p.processSCION()
 
+		if err != nil {
+			return processResult{}, err
+		}
+
+		address := p.scionLayer.SrcIA
+		identifier := fmt.Sprintf("%s-%d", address.String(), res.EgressID)
+		rateLimiter, ok := p.d.SyncRateLimiters[p.ingressID]
+
+		if !ok {
+			p.d.InitRateLimiter(p.ingressID)
+			rateLimiter, _ = p.d.SyncRateLimiters[p.ingressID]
+		}
+
+		rateLimiter.Lock()
+		defer rateLimiter.Unlock()
+		if rateLimiter.Ratelimiter.Contains(identifier) {
+			appliable := rateLimiter.Ratelimiter.Apply(identifier, int64(len(rawPkt)), time.Now())
+			if !appliable {
+				stringAddress := address.String()
 				metrics, ok := p.d.trafficMonitoringMetrics[stringAddress]
+				if !ok {
+					if address != p.d.localIA {
+						labels := prometheus.Labels{
+							"isd_as":     p.d.localIA.String(),
+							"scr_isd_as": stringAddress,
+						}
+						p.d.trafficMonitoringMetrics[stringAddress] = initTrafficMonitoringMetrics(p.d.Metrics, labels)
+					}
+				}
+				metrics, ok = p.d.trafficMonitoringMetrics[stringAddress]
 
 				if ok {
 					metrics.DroppedPacketsDueToRL.Inc()
-					return processResult{}, rateLimited
 				}
+				return processResult{}, rateLimited
 			}
 		}
 
-		return p.processSCION()
+		return res, err
 	case epic.PathType:
 		return p.processEPIC()
 	case colibri.PathType:
@@ -804,7 +817,6 @@ func (p *scionPacketProcessor) processIntraBFD(src *net.UDPAddr, data []byte) er
 
 func (p *scionPacketProcessor) processSCION() (processResult, error) {
 
-	//heeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeere
 	var ok bool
 	p.path, ok = p.scionLayer.Path.(*scion.Raw)
 	if !ok {
