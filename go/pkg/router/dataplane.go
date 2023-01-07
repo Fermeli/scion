@@ -121,7 +121,8 @@ type DataPlane struct {
 	Metrics                  *Metrics
 	forwardingMetrics        map[uint16]forwardingMetrics
 	trafficMonitoringMetrics map[string]trafficMonitoringMetrics
-	SyncRateLimiters         map[uint16]*syncRateLimiter
+	// SyncRateLimiters maps an ingressID to its syncRateLimiter
+	SyncRateLimiters map[uint16]*syncRateLimiter
 }
 
 var (
@@ -494,6 +495,8 @@ func (d *DataPlane) Run(ctx context.Context) error {
 	d.SyncRateLimiters = make(map[uint16]*syncRateLimiter)
 	read := func(ingressID uint16, rd BatchConn) {
 
+		d.InitRateLimiter(ingressID)
+
 		msgs := conn.NewReadMessages(inputBatchCnt)
 		for _, msg := range msgs {
 			msg.Buffers[0] = make([]byte, bufSize)
@@ -702,13 +705,8 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 
 		address := p.scionLayer.SrcIA
-		identifier := fmt.Sprintf("%s-%d", address.String(), res.EgressID)
-		rateLimiter, ok := p.d.SyncRateLimiters[p.ingressID]
-
-		if !ok {
-			p.d.InitRateLimiter(p.ingressID)
-			rateLimiter, _ = p.d.SyncRateLimiters[p.ingressID]
-		}
+		identifier := p.d.BuildIdentifier(res.EgressID, address.String())
+		rateLimiter, _ := p.d.SyncRateLimiters[p.ingressID]
 
 		rateLimiter.Lock()
 		defer rateLimiter.Unlock()
@@ -1475,6 +1473,10 @@ func (d *DataPlane) resolveLocalDst(s slayers.SCION) (*net.UDPAddr, error) {
 	default:
 		panic("unexpected address type returned from DstAddr")
 	}
+}
+
+func (d *DataPlane) BuildIdentifier(egress uint16, address string) string {
+	return fmt.Sprintf("%s-%d", address, egress)
 }
 
 func addEndhostPort(dst *net.IPAddr) *net.UDPAddr {

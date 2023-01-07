@@ -20,7 +20,6 @@ package proto.colibri.v1;
 
 
 service RateLimiterService {
-    rpc AddRateLimit(AddRateLimitRequest) returns (Success) {}
     rpc SetBurstSizeAndRate(SetBurstSizeAndRateRequest) returns (Success) {}
     rpc SetBurstSize(SetBurstSizeRequest) returns (Success) {}
     rpc SetRate(SetRateRequest) returns (Success) {}
@@ -30,35 +29,30 @@ service RateLimiterService {
 
 // /////////////////////////////////////////////////
 
-message AddRateLimitRequest {
-    string address = 1;
-    double rate = 2;
-    int64 cbs = 3;
-    int32 ingress = 4;
-    int32 egress = 5;
-}
 
 message Success {
 }
 
 message SetBurstSizeRequest {
     string address = 1;
-    int64 cbs = 2;
-    int32 ingress = 3;
-    int32 egress = 4;
+    int32 ingress = 2;
+    int32 egress = 3;
+    int64 cbs = 4;
+
 }
 
 message SetRateRequest {
     string address = 1;
-    double rate = 2;
-    int32 ingress = 3;
-    int32 egress = 4;
+    int32 ingress = 2;
+    int32 egress = 3;
+    double rate = 4;
 }
 
 message SetBurstSizeAndRateRequest {
     string address = 1;
-    int64 cbs = 2;
-    double rate = 3;
-    int32 ingress = 4;
-    int32 egress = 5;
+    int32 ingress = 2;
+    int32 egress = 3;
+    int64 cbs = 4;
+    double rate = 5;
+
 }

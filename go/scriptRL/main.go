@@ -13,23 +13,23 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const serverAddr = "localhost:5045"
+const port = 5045
 
 func main() {
 
+	var serverAddr string
 	var address string
 	var cbs int64
 	var rate float64
 	var ingress int
 	var egress int
-	var add bool
 
+	flag.StringVar(&serverAddr, "s", "", "address of the server")
 	flag.StringVar(&address, "address", "", "address of an AS")
 	flag.Int64Var(&cbs, "cbs", -1, "cbs")
 	flag.Float64Var(&rate, "rate", -1, "rate")
 	flag.IntVar(&ingress, "ingress", -1, "ingress")
 	flag.IntVar(&egress, "egress", -1, "egress")
-	flag.BoolVar(&add, "add", false, "add")
 	flag.Parse()
 
 	if address == "" {
@@ -48,25 +48,12 @@ func main() {
 	defer cancel()
 	var opts []grpc.DialOption
 	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	conn, err := grpc.Dial(serverAddr, opts...)
+	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", serverAddr, port), opts...)
 	if err != nil {
 		log.Fatalln(err)
 	}
 	defer conn.Close()
 	client := colpb.NewRateLimiterServiceClient(conn)
-
-	if add {
-		if cbs == -1 || rate == -1 {
-			log.Fatalln("The cbs and the rate must be set to add a new rate limit")
-		}
-		_, err = client.AddRateLimit(ctx, &colpb.AddRateLimitRequest{Address: address,
-			Cbs: cbs, Rate: rate, Ingress: int32(ingress), Egress: int32(egress)})
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		return
-	}
 
 	if cbs != -1 && rate != -1 {
 		_, err = client.SetBurstSizeAndRate(ctx, &colpb.SetBurstSizeAndRateRequest{Address: address,
@@ -78,10 +65,8 @@ func main() {
 	}
 
 	if cbs != -1 {
-		fmt.Println(("step1"))
 		_, err = client.SetBurstSize(ctx, &colpb.SetBurstSizeRequest{Address: address, Cbs: cbs,
 			Ingress: int32(ingress), Egress: int32(egress)})
-		fmt.Println(("step1"))
 		if err != nil {
 			log.Fatalln(err)
 		}

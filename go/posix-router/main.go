@@ -42,29 +42,14 @@ import (
 	"github.com/scionproto/scion/go/pkg/service"
 )
 
-const grpcServerAddr = "localhost:5045"
-const rateLimiterAsAdress = "1-ff00:0:111"
+const port = 5045
 
 var globalCfg config.Config
 
 type rateLimiterServer struct {
 	colpb.UnimplementedRateLimiterServiceServer
-	dp *router.DataPlane
-}
-
-func (r *rateLimiterServer) AddRateLimit(ctx context.Context, req *colpb.AddRateLimitRequest) (*colpb.Success, error) {
-	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
-
-	if !ok {
-		r.dp.InitRateLimiter(uint16(req.Ingress))
-		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
-	}
-
-	rateLimiter.Lock()
-	defer rateLimiter.Unlock()
-
-	rateLimiter.Ratelimiter.AddRatelimit(buildIdentifier(uint16(req.Egress), req.Address), req.Rate, req.Cbs, time.Now())
-	return &colpb.Success{}, nil
+	dp      *router.DataPlane
+	address string
 }
 
 func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurstSizeRequest) (*colpb.Success, error) {
@@ -77,7 +62,7 @@ func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurs
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	err := rateLimiter.Ratelimiter.SetBurstSize(buildIdentifier(uint16(req.Egress), req.Address), req.Cbs)
+	err := rateLimiter.Ratelimiter.SetBurstSize(r.dp.BuildIdentifier(uint16(req.Egress), req.Address), req.Cbs)
 	return &colpb.Success{}, err
 }
 
@@ -87,11 +72,17 @@ func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.
 	if !ok {
 		r.dp.InitRateLimiter(uint16(req.Ingress))
 		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
 	}
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	err := rateLimiter.Ratelimiter.SetBurstSizeAndRate(buildIdentifier(uint16(req.Egress), req.Address), req.Cbs, req.Rate)
+	identifier := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
+	if !rateLimiter.Ratelimiter.Contains(identifier) {
+		rateLimiter.Ratelimiter.AddRatelimit(identifier, req.Rate, req.Cbs, time.Now())
+		return &colpb.Success{}, nil
+	}
+	err := rateLimiter.Ratelimiter.SetBurstSizeAndRate(identifier, req.Cbs, req.Rate)
 	return &colpb.Success{}, err
 }
 
@@ -105,12 +96,8 @@ func (r *rateLimiterServer) SetRate(ctx context.Context, req *colpb.SetRateReque
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	err := rateLimiter.Ratelimiter.SetRate(buildIdentifier(uint16(req.Egress), req.Address), req.Rate)
+	err := rateLimiter.Ratelimiter.SetRate(r.dp.BuildIdentifier(uint16(req.Egress), req.Address), req.Rate)
 	return &colpb.Success{}, err
-}
-
-func buildIdentifier(egress uint16, address string) string {
-	return fmt.Sprintf("%s-%d", address, egress)
 }
 
 func main() {
@@ -200,23 +187,20 @@ func realMain(ctx context.Context) error {
 		return nil
 	})
 
-	// To test the rate limiter the AS whose address is 1-ff00:0:111
-	if controlConfig.IA.String() == rateLimiterAsAdress {
-		// Run a grpc server to listen to rate limit adjsutment requests
-		g.Go(func() error {
-			defer log.HandlePanic()
-			lis, err := net.Listen("tcp", grpcServerAddr)
-			if err != nil {
-				return serrors.WrapStr("failed to listen:", err)
-			}
-			var opts []grpc.ServerOption
-			rateLimiterServer := rateLimiterServer{dp: &dp.DataPlane}
-			grpcServer := grpc.NewServer(opts...)
-			colpb.RegisterRateLimiterServiceServer(grpcServer, &rateLimiterServer)
-			grpcServer.Serve(lis)
-			return nil
-		})
-	}
+	// Run a grpc server to listen to rate limit adjsutment requests
+	g.Go(func() error {
+		defer log.HandlePanic()
+		lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", controlConfig.BR.InternalAddr.IP.String(), port)) //grpcServerAddr)
+		if err != nil {
+			return serrors.WrapStr("failed to listen:", err)
+		}
+		var opts []grpc.ServerOption
+		rateLimiterServer := rateLimiterServer{dp: &dp.DataPlane, address: controlConfig.BR.InternalAddr.IP.String()}
+		grpcServer := grpc.NewServer(opts...)
+		colpb.RegisterRateLimiterServiceServer(grpcServer, &rateLimiterServer)
+		grpcServer.Serve(lis)
+		return nil
+	})
 
 	return g.Wait()
 }
