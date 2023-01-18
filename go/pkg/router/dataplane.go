@@ -123,6 +123,7 @@ type DataPlane struct {
 	trafficMonitoringMetrics map[string]trafficMonitoringMetrics
 	// SyncRateLimiters maps an ingressID to its syncRateLimiter
 	SyncRateLimiters map[uint16]*syncRateLimiter
+	bloomfilter      bloomfilter.SlidingBloomFilter
 }
 
 var (
@@ -493,6 +494,8 @@ func (d *DataPlane) Run(ctx context.Context) error {
 	d.running = true
 	d.initMetrics()
 	d.SyncRateLimiters = make(map[uint16]*syncRateLimiter)
+	bloomFilter := bloomfilter.NewOptimalSlidingBloomFilter(0.01, 11000000, 3*time.Second, time.Now(), 3)
+	d.bloomfilter = bloomFilter
 	read := func(ingressID uint16, rd BatchConn) {
 
 		d.InitRateLimiter(ingressID)
@@ -631,12 +634,6 @@ type processResult struct {
 
 func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
 
-	ratelimiter := ratelimiter.NewRateLimiter()
-	ratelimiter.AddRatelimit("1-ff00:0:110", 500000, 2000, time.Now())
-	bloomFilter := bloomfilter.NewOptimalSlidingBloomFilter(0.01, 11000000, 3*time.Second, time.Now(), 3)
-
-	//ratelimiter.SetBurstSizeAndRate("a", 20000000, 1000000)
-
 	return &scionPacketProcessor{
 		d:         d,
 		ingressID: ingressID,
@@ -646,8 +643,6 @@ func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
 			scionInput: make([]byte, path.MACBufferSize),
 			epicInput:  make([]byte, libepic.MACBufferSize),
 		},
-		ratelimiter: ratelimiter,
-		bloomfilter: bloomFilter,
 	}
 }
 
@@ -701,11 +696,17 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		res, err := p.processSCION()
 
 		if err != nil {
-			return processResult{}, err
+			return res, err
 		}
 
 		address := p.scionLayer.SrcIA
-		identifier := p.d.BuildIdentifier(res.EgressID, address.String())
+		stringAddress := address.String()
+		identifier, err := p.d.BuildIdentifier1(res.EgressID, stringAddress)
+
+		if err != nil {
+			return res, err
+		}
+
 		rateLimiter, _ := p.d.SyncRateLimiters[p.ingressID]
 
 		rateLimiter.Lock()
@@ -713,7 +714,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		if rateLimiter.Ratelimiter.Contains(identifier) {
 			appliable := rateLimiter.Ratelimiter.Apply(identifier, int64(len(rawPkt)), time.Now())
 			if !appliable {
-				stringAddress := address.String()
+
 				metrics, ok := p.d.trafficMonitoringMetrics[stringAddress]
 				if !ok {
 					if address != p.d.localIA {
@@ -722,9 +723,9 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 							"scr_isd_as": stringAddress,
 						}
 						p.d.trafficMonitoringMetrics[stringAddress] = initTrafficMonitoringMetrics(p.d.Metrics, labels)
+						metrics, ok = p.d.trafficMonitoringMetrics[stringAddress]
 					}
 				}
-				metrics, ok = p.d.trafficMonitoringMetrics[stringAddress]
 
 				if ok {
 					metrics.DroppedPacketsDueToRL.Inc()
@@ -747,20 +748,28 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 
 		packetIdentifier := append(append(byteAddress, path.PacketTimestamp[:]...), path.InfoField.ResIdSuffix...)
-		duplicatedPacket, err := p.bloomfilter.HasBeenSeen(packetIdentifier, time.Now())
+		duplicatedPacket, err := p.d.bloomfilter.HasBeenSeen(packetIdentifier, time.Now())
 
 		if err != nil {
 			return processResult{}, err
 		}
 
 		if duplicatedPacket {
-
-			metrics, ok := p.d.trafficMonitoringMetrics[address.String()]
-
-			if ok {
-				metrics.DroppedPacketsDueToDD.Inc()
-				return processResult{}, duplicateDetected
+			stringAddress := address.String()
+			metrics, ok := p.d.trafficMonitoringMetrics[stringAddress]
+			if !ok {
+				if address != p.d.localIA {
+					labels := prometheus.Labels{
+						"isd_as":     p.d.localIA.String(),
+						"scr_isd_as": stringAddress,
+					}
+					p.d.trafficMonitoringMetrics[stringAddress] = initTrafficMonitoringMetrics(p.d.Metrics, labels)
+					metrics, ok = p.d.trafficMonitoringMetrics[stringAddress]
+				}
 			}
+
+			metrics.DroppedPacketsDueToDD.Inc()
+			return processResult{}, duplicateDetected
 
 		}
 
@@ -922,10 +931,6 @@ type scionPacketProcessor struct {
 	cachedMac []byte
 	// macBuffers avoid allocating memory during processing.
 	macBuffers macBuffers
-
-	ratelimiter ratelimiter.RateLimiter
-
-	bloomfilter bloomfilter.SlidingBloomFilter
 }
 
 // macBuffers are preallocated buffers for the in- and outputs of MAC functions.
@@ -1477,6 +1482,26 @@ func (d *DataPlane) resolveLocalDst(s slayers.SCION) (*net.UDPAddr, error) {
 
 func (d *DataPlane) BuildIdentifier(egress uint16, address string) string {
 	return fmt.Sprintf("%s-%d", address, egress)
+}
+
+func (d *DataPlane) BuildIdentifier1(egress uint16, address string) ([10]byte, error) {
+
+	var identifierBytes [10]byte
+	srcAS, err := addr.ParseIA(address)
+
+	if err != nil {
+		return identifierBytes, err
+	}
+
+	egressBytes := make([]byte, 2)
+	srcASBytes := make([]byte, 8)
+
+	binary.LittleEndian.PutUint64(srcASBytes, uint64(srcAS))
+	binary.LittleEndian.PutUint16(egressBytes, egress)
+
+	copy(identifierBytes[:], append(srcASBytes, egressBytes...))
+
+	return identifierBytes, nil
 }
 
 func addEndhostPort(dst *net.IPAddr) *net.UDPAddr {

@@ -8,7 +8,7 @@ import (
 )
 
 type RateLimiter struct {
-	buckets map[string]*tokenbucket.TokenBucket
+	buckets map[[10]byte]*tokenbucket.TokenBucket
 }
 
 // NewRateLimiter initalizes and returns a RateLimiter. The map of buckets is empty at
@@ -21,18 +21,18 @@ func NewRateLimiter() RateLimiter {
 
 // Clear clears the buckets of the RateLimiter
 func (r *RateLimiter) Clear() {
-	r.buckets = make(map[string]*tokenbucket.TokenBucket)
+	r.buckets = make(map[[10]byte]*tokenbucket.TokenBucket)
 }
- 
+
 // AddRatelimit adds a new identifier and initializes the fields of its bucket
-func (r *RateLimiter) AddRatelimit(identifier string, rate float64, cbs int64, now time.Time) {
+func (r *RateLimiter) AddRatelimit(identifier [10]byte, rate float64, cbs int64, now time.Time) {
 	newTokenBucket := tokenbucket.NewTokenBucket(now, cbs, rate)
 	r.buckets[identifier] = &newTokenBucket
 }
 
 // SetRate sets the value of the time interval of the token bucket of the given identifier to the
 // one given
-func (r *RateLimiter) SetRate(identifier string, rate float64) error {
+func (r *RateLimiter) SetRate(identifier [10]byte, rate float64) error {
 	tokenBucket, keyPresent := r.buckets[identifier]
 
 	if keyPresent {
@@ -45,7 +45,7 @@ func (r *RateLimiter) SetRate(identifier string, rate float64) error {
 
 // SetBurstSize sets the value of the cbs of the token bucket of the given identifier to
 // the one given
-func (r *RateLimiter) SetBurstSize(identifier string, cbs int64) error {
+func (r *RateLimiter) SetBurstSize(identifier [10]byte, cbs int64) error {
 	tokenBucket, keyPresent := r.buckets[identifier]
 
 	if keyPresent {
@@ -58,7 +58,7 @@ func (r *RateLimiter) SetBurstSize(identifier string, cbs int64) error {
 
 // GetRate returns T the time interval of the token bucket of the given identifier, or -1 and an
 // error if the identifier is not present in the map
-func (r *RateLimiter) GetRate(identifier string) (float64, error) {
+func (r *RateLimiter) GetRate(identifier [10]byte) (float64, error) {
 	tokenBucket, keyPresent := r.buckets[identifier]
 
 	if !keyPresent {
@@ -70,7 +70,7 @@ func (r *RateLimiter) GetRate(identifier string) (float64, error) {
 
 // GetBurstSize returns the cbs (Committed burst size) of the token bucket of the given identifier,
 // or -1 and an error if the identifier is not present in the map
-func (r *RateLimiter) GetBurstSize(identifier string) (int64, error) {
+func (r *RateLimiter) GetBurstSize(identifier [10]byte) (int64, error) {
 	tokenBucket, keyPresent := r.buckets[identifier]
 
 	if !keyPresent {
@@ -81,7 +81,7 @@ func (r *RateLimiter) GetBurstSize(identifier string) (int64, error) {
 }
 
 // GetBurstSizeAndRate returns the cbs and of the rate
-func (r *RateLimiter) GetBurstSizeAndRate(identifier string) (int64, float64, error) {
+func (r *RateLimiter) GetBurstSizeAndRate(identifier [10]byte) (int64, float64, error) {
 	tokenBucket, keyPresent := r.buckets[identifier]
 
 	if !keyPresent {
@@ -92,7 +92,7 @@ func (r *RateLimiter) GetBurstSizeAndRate(identifier string) (int64, float64, er
 }
 
 // SetBurstSizeAndRate sets the value of the cbs and of the rate at the ones given
-func (r *RateLimiter) SetBurstSizeAndRate(identifier string, cbs int64, rate float64) error {
+func (r *RateLimiter) SetBurstSizeAndRate(identifier [10]byte, cbs int64, rate float64) error {
 	tokenBucket, keyPresent := r.buckets[identifier]
 
 	if keyPresent {
@@ -106,7 +106,7 @@ func (r *RateLimiter) SetBurstSizeAndRate(identifier string, cbs int64, rate flo
 
 // Apply applies the token bucket algorithm to the token bucket of the given identifier.
 // Check the doc of TokenBucket.Apply
-func (r *RateLimiter) Apply(identifier string, pktLen int64, now time.Time) bool {
+func (r *RateLimiter) Apply(identifier [10]byte, pktLen int64, now time.Time) bool {
 	tokenBucket, keyPresent := r.buckets[identifier]
 
 	if !keyPresent {
@@ -118,7 +118,7 @@ func (r *RateLimiter) Apply(identifier string, pktLen int64, now time.Time) bool
 }
 
 // Contains return true if the identifier is contained in the map and false otherwise.
-func (r *RateLimiter) Contains(identifier string) bool {
+func (r *RateLimiter) Contains(identifier [10]byte) bool {
 	_, keyPresent := r.buckets[identifier]
 	return keyPresent
 }

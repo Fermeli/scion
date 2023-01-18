@@ -48,8 +48,7 @@ var globalCfg config.Config
 
 type rateLimiterServer struct {
 	colpb.UnimplementedRateLimiterServiceServer
-	dp      *router.DataPlane
-	address string
+	dp *router.DataPlane
 }
 
 func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurstSizeRequest) (*colpb.Success, error) {
@@ -62,7 +61,13 @@ func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurs
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	err := rateLimiter.Ratelimiter.SetBurstSize(r.dp.BuildIdentifier(uint16(req.Egress), req.Address), req.Cbs)
+	identifier, err := r.dp.BuildIdentifier1(uint16(req.Egress), req.Address)
+
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+
+	err = rateLimiter.Ratelimiter.SetBurstSize(identifier, req.Cbs)
 	return &colpb.Success{}, err
 }
 
@@ -77,12 +82,17 @@ func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	identifier := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
+	identifier, err := r.dp.BuildIdentifier1(uint16(req.Egress), req.Address)
+
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+
 	if !rateLimiter.Ratelimiter.Contains(identifier) {
 		rateLimiter.Ratelimiter.AddRatelimit(identifier, req.Rate, req.Cbs, time.Now())
 		return &colpb.Success{}, nil
 	}
-	err := rateLimiter.Ratelimiter.SetBurstSizeAndRate(identifier, req.Cbs, req.Rate)
+	err = rateLimiter.Ratelimiter.SetBurstSizeAndRate(identifier, req.Cbs, req.Rate)
 	return &colpb.Success{}, err
 }
 
@@ -96,7 +106,12 @@ func (r *rateLimiterServer) SetRate(ctx context.Context, req *colpb.SetRateReque
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	err := rateLimiter.Ratelimiter.SetRate(r.dp.BuildIdentifier(uint16(req.Egress), req.Address), req.Rate)
+	identifier, err := r.dp.BuildIdentifier1(uint16(req.Egress), req.Address)
+
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	err = rateLimiter.Ratelimiter.SetRate(identifier, req.Rate)
 	return &colpb.Success{}, err
 }
 
@@ -195,7 +210,7 @@ func realMain(ctx context.Context) error {
 			return serrors.WrapStr("failed to listen:", err)
 		}
 		var opts []grpc.ServerOption
-		rateLimiterServer := rateLimiterServer{dp: &dp.DataPlane, address: controlConfig.BR.InternalAddr.IP.String()}
+		rateLimiterServer := rateLimiterServer{dp: &dp.DataPlane}
 		grpcServer := grpc.NewServer(opts...)
 		colpb.RegisterRateLimiterServiceServer(grpcServer, &rateLimiterServer)
 		grpcServer.Serve(lis)

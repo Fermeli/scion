@@ -25,7 +25,9 @@ func TestApplyReturnsFalseIfNoRateLimitsHaveBeenAdded(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		res := rateLimiter.Apply(test.identifier, test.pktLen, test.now)
+		var identifier [10]byte
+		copy(identifier[:], []byte(test.identifier))
+		res := rateLimiter.Apply(identifier, test.pktLen, test.now)
 		if res != test.want {
 			t.Errorf("Error")
 		}
@@ -37,7 +39,10 @@ func TestApplyReturnsFalseIfIdentfierHaveNotBeenAddedAndTrueOtherwise(t *testing
 	rateLimiter := NewRateLimiter()
 	now := time.Now()
 
-	rateLimiter.AddRatelimit("identifier", 1000000000, 5, now)
+	var identifier [10]byte
+	copy(identifier[:], []byte("identifier"))
+
+	rateLimiter.AddRatelimit(identifier, 1000000000, 5, now)
 
 	tests := []struct {
 		identifier string
@@ -48,13 +53,15 @@ func TestApplyReturnsFalseIfIdentfierHaveNotBeenAddedAndTrueOtherwise(t *testing
 		want       bool
 	}{
 		{"identifier", 1, 1, 1, now.Add(10), true},
-		{"identifier1", 1, 2, 1, now.Add(10), false},
+		{"identifie", 1, 2, 1, now.Add(10), false},
 		{"ientifier", 50, 10, 1, now.Add(100), false},
-		{"124855fezfzezffze", 30, 40, 1, now.Add(1000), false},
+		{"124855fez", 30, 40, 1, now.Add(1000), false},
 	}
 
 	for _, test := range tests {
-		res := rateLimiter.Apply(test.identifier, test.pktLen, test.now)
+		var indentifier1 [10]byte
+		copy(indentifier1[:], []byte(test.identifier))
+		res := rateLimiter.Apply(indentifier1, test.pktLen, test.now)
 		if res != test.want {
 			t.Errorf("Error")
 		}
@@ -76,7 +83,9 @@ func TestGetBurstSizeReturnsAnErrorWithUnknownIdentifier(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		res, err := rateLimiter.GetBurstSize(test.identifier)
+		var identifier [10]byte
+		copy(identifier[:], []byte(test.identifier))
+		res, err := rateLimiter.GetBurstSize(identifier)
 		if res != test.want || err == nil {
 			t.Errorf("Error")
 		}
@@ -98,7 +107,9 @@ func TestGetRateReturnsAnErrorWithUnknownIdentifier(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		res, err := rateLimiter.GetRate(test.identifier)
+		var identifier [10]byte
+		copy(identifier[:], []byte(test.identifier))
+		res, err := rateLimiter.GetRate(identifier)
 		if res != test.want || err == nil {
 			t.Errorf("Error")
 		}
@@ -119,7 +130,9 @@ func TestSetBurstSizeReturnsAnErrorWithUnknownIdentifier(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		err := rateLimiter.SetBurstSize(test.identifier, 5)
+		var identifier [10]byte
+		copy(identifier[:], []byte(test.identifier))
+		err := rateLimiter.SetBurstSize(identifier, 5)
 		if err == nil {
 			t.Errorf("Error")
 		}
@@ -140,7 +153,9 @@ func TestSetRateReturnsAnErrorWithUnknownIdentifier(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		err := rateLimiter.SetRate(test.identifier, 5)
+		var identifier [10]byte
+		copy(identifier[:], []byte(test.identifier))
+		err := rateLimiter.SetRate(identifier, 5)
 		if err == nil {
 			t.Errorf("Error")
 		}
