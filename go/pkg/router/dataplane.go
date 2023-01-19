@@ -701,7 +701,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 
 		address := p.scionLayer.SrcIA
 		stringAddress := address.String()
-		identifier, err := p.d.BuildIdentifier1(res.EgressID, stringAddress)
+		identifier, err := p.d.BuildIdentifier(res.EgressID, stringAddress)
 
 		if err != nil {
 			return res, err
@@ -1480,11 +1480,7 @@ func (d *DataPlane) resolveLocalDst(s slayers.SCION) (*net.UDPAddr, error) {
 	}
 }
 
-func (d *DataPlane) BuildIdentifier(egress uint16, address string) string {
-	return fmt.Sprintf("%s-%d", address, egress)
-}
-
-func (d *DataPlane) BuildIdentifier1(egress uint16, address string) ([10]byte, error) {
+func (d *DataPlane) BuildIdentifier(egress uint16, address string) ([10]byte, error) {
 
 	var identifierBytes [10]byte
 	srcAS, err := addr.ParseIA(address)

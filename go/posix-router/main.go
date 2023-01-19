@@ -61,7 +61,7 @@ func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurs
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	identifier, err := r.dp.BuildIdentifier1(uint16(req.Egress), req.Address)
+	identifier, err := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
 
 	if err != nil {
 		return &colpb.Success{}, err
@@ -82,7 +82,7 @@ func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	identifier, err := r.dp.BuildIdentifier1(uint16(req.Egress), req.Address)
+	identifier, err := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
 
 	if err != nil {
 		return &colpb.Success{}, err
@@ -106,7 +106,7 @@ func (r *rateLimiterServer) SetRate(ctx context.Context, req *colpb.SetRateReque
 
 	rateLimiter.Lock()
 	defer rateLimiter.Unlock()
-	identifier, err := r.dp.BuildIdentifier1(uint16(req.Egress), req.Address)
+	identifier, err := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
 
 	if err != nil {
 		return &colpb.Success{}, err
