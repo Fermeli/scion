@@ -527,7 +527,8 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				inputCounters.InputBytesTotal.Add(float64(p.N))
 
 				srcAddr := p.Addr.(*net.UDPAddr)
-				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr) //inputCounters)
+				rawPkt := p.Buffers[0][:p.N]
+				result, err := processor.processPkt(rawPkt, srcAddr) //inputCounters)
 
 				switch {
 				case err == nil:
@@ -541,6 +542,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				default:
 					log.Debug("Error processing packet", "err", err)
 					inputCounters.DroppedPacketsTotal.Inc()
+					inputCounters.DroppedBytesTotal.Add(float64(len(rawPkt)))
 					continue
 				}
 				if result.OutConn == nil { // e.g. BFD case no message is forwarded
@@ -568,6 +570,7 @@ func (d *DataPlane) Run(ctx context.Context) error {
 						// error metric
 					}
 					inputCounters.DroppedPacketsTotal.Inc()
+					inputCounters.DroppedBytesTotal.Add(float64(len(rawPkt)))
 					continue
 				}
 				// ok metric
@@ -714,21 +717,10 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		if rateLimiter.Ratelimiter.Contains(identifier) {
 			appliable := rateLimiter.Ratelimiter.Apply(identifier, int64(len(rawPkt)), time.Now())
 			if !appliable {
-
 				metrics, ok := p.d.trafficMonitoringMetrics[stringAddress]
-				if !ok {
-					if address != p.d.localIA {
-						labels := prometheus.Labels{
-							"isd_as":     p.d.localIA.String(),
-							"scr_isd_as": stringAddress,
-						}
-						p.d.trafficMonitoringMetrics[stringAddress] = initTrafficMonitoringMetrics(p.d.Metrics, labels)
-						metrics, ok = p.d.trafficMonitoringMetrics[stringAddress]
-					}
-				}
-
 				if ok {
 					metrics.DroppedPacketsDueToRL.Inc()
+					metrics.DroppedBytesDueToRL.Add(float64(len(rawPkt)))
 				}
 				return processResult{}, rateLimited
 			}
@@ -757,20 +749,19 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		if duplicatedPacket {
 			stringAddress := address.String()
 			metrics, ok := p.d.trafficMonitoringMetrics[stringAddress]
-			if !ok {
-				if address != p.d.localIA {
+			if ok {
+				if metrics.DroppedPacketsDueToDD == nil {
 					labels := prometheus.Labels{
 						"isd_as":     p.d.localIA.String(),
 						"scr_isd_as": stringAddress,
 					}
-					p.d.trafficMonitoringMetrics[stringAddress] = initTrafficMonitoringMetrics(p.d.Metrics, labels)
-					metrics, ok = p.d.trafficMonitoringMetrics[stringAddress]
+					metrics.DroppedPacketsDueToDD = p.d.Metrics.DroppedPacketsDueToDD.With(labels)
 				}
+
+				metrics.DroppedPacketsDueToDD.Inc()
 			}
 
-			metrics.DroppedPacketsDueToDD.Inc()
 			return processResult{}, duplicateDetected
-
 		}
 
 		return p.processCOLIBRI()
@@ -1480,6 +1471,8 @@ func (d *DataPlane) resolveLocalDst(s slayers.SCION) (*net.UDPAddr, error) {
 	}
 }
 
+// BuildIdentifier builds and returns the 10 bytes array identifier used for the rate
+// limiter from the given egressId and address
 func (d *DataPlane) BuildIdentifier(egress uint16, address string) ([10]byte, error) {
 
 	var identifierBytes [10]byte
@@ -1498,6 +1491,38 @@ func (d *DataPlane) BuildIdentifier(egress uint16, address string) ([10]byte, er
 	copy(identifierBytes[:], append(srcASBytes, egressBytes...))
 
 	return identifierBytes, nil
+}
+
+func (d *DataPlane) InitTrafficMonitoringMetrics(address string, cbs uint64, rate float64) {
+
+	metrics := d.Metrics
+	labels := prometheus.Labels{
+		"isd_as":     d.localIA.String(),
+		"scr_isd_as": address,
+	}
+
+	c := trafficMonitoringMetrics{
+		DroppedPacketsDueToRL: metrics.DroppedPacketsDueToRL.With(labels),
+		DroppedPacketsDueToDD: metrics.DroppedPacketsDueToDD.With(labels),
+		DroppedBytesDueToRL:   metrics.DroppedBytesDueToRL.With(labels),
+		Cbs:                   metrics.Cbs.With(labels),
+		Rate:                  metrics.Rate.With(labels),
+	}
+
+	c.DroppedPacketsDueToRL.Add(0)
+	c.DroppedPacketsDueToDD.Add(0)
+	c.DroppedBytesDueToRL.Add(0)
+	c.Cbs.Set(float64(cbs))
+	c.Rate.Set(rate)
+	d.trafficMonitoringMetrics[address] = c
+}
+
+func (d *DataPlane) SetCbsMetric(address string, cbs uint64) {
+	d.trafficMonitoringMetrics[address].Cbs.Set(float64(cbs))
+}
+
+func (d *DataPlane) SetRateMetric(address string, rate float64) {
+	d.trafficMonitoringMetrics[address].Rate.Set(rate)
 }
 
 func addEndhostPort(dst *net.IPAddr) *net.UDPAddr {
@@ -1725,6 +1750,7 @@ type forwardingMetrics struct {
 	InputPacketsTotal   prometheus.Counter
 	OutputPacketsTotal  prometheus.Counter
 	DroppedPacketsTotal prometheus.Counter
+	DroppedBytesTotal   prometheus.Counter
 }
 
 // forwardingMetrics contains the subset of Metrics relevant for traffic
@@ -1732,6 +1758,9 @@ type forwardingMetrics struct {
 type trafficMonitoringMetrics struct {
 	DroppedPacketsDueToRL prometheus.Counter
 	DroppedPacketsDueToDD prometheus.Counter
+	DroppedBytesDueToRL   prometheus.Counter
+	Cbs                   prometheus.Gauge
+	Rate                  prometheus.Gauge
 }
 
 func initForwardingMetrics(metrics *Metrics, labels prometheus.Labels) forwardingMetrics {
@@ -1741,23 +1770,14 @@ func initForwardingMetrics(metrics *Metrics, labels prometheus.Labels) forwardin
 		OutputBytesTotal:    metrics.OutputBytesTotal.With(labels),
 		OutputPacketsTotal:  metrics.OutputPacketsTotal.With(labels),
 		DroppedPacketsTotal: metrics.DroppedPacketsTotal.With(labels),
+		DroppedBytesTotal:   metrics.DroppedBytesTotal.With(labels),
 	}
 	c.InputBytesTotal.Add(0)
 	c.InputPacketsTotal.Add(0)
 	c.OutputBytesTotal.Add(0)
 	c.OutputPacketsTotal.Add(0)
 	c.DroppedPacketsTotal.Add(0)
-	return c
-}
-
-func initTrafficMonitoringMetrics(metrics *Metrics, labels prometheus.Labels) trafficMonitoringMetrics {
-	c := trafficMonitoringMetrics{
-		DroppedPacketsDueToRL: metrics.DroppedPacketsDueToRL.With(labels),
-		DroppedPacketsDueToDD: metrics.DroppedPacketsDueToDD.With(labels),
-	}
-
-	c.DroppedPacketsDueToRL.Add(0)
-	c.DroppedPacketsDueToDD.Add(0)
+	c.DroppedBytesTotal.Add(0)
 	return c
 }
 

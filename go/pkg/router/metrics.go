@@ -38,6 +38,10 @@ type Metrics struct {
 	SiblingBFDStateChanges    *prometheus.CounterVec
 	DroppedPacketsDueToRL     *prometheus.CounterVec
 	DroppedPacketsDueToDD     *prometheus.CounterVec
+	Cbs                       *prometheus.GaugeVec
+	Rate                      *prometheus.GaugeVec
+	DroppedBytesTotal         *prometheus.CounterVec
+	DroppedBytesDueToRL       *prometheus.CounterVec
 }
 
 // NewMetrics initializes the metrics for the Border Router, and registers them
@@ -163,6 +167,34 @@ func NewMetrics() *Metrics {
 			prometheus.CounterOpts{
 				Name: "dropped_packets_due_to_DD",
 				Help: "The number of packets that have been dropped due to duplicate detection",
+			},
+			[]string{"isd_as", "scr_isd_as"},
+		),
+		Cbs: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "Cbs",
+				Help: "Cbs",
+			},
+			[]string{"isd_as", "scr_isd_as"},
+		),
+		Rate: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "Rate",
+				Help: "Rate",
+			},
+			[]string{"isd_as", "scr_isd_as"},
+		),
+		DroppedBytesTotal: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "router_dropped_bytes_due_to_RL",
+				Help: "Number of bytes dropped by the router due to RL.",
+			},
+			[]string{"interface", "isd_as", "neighbor_isd_as"},
+		),
+		DroppedBytesDueToRL: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "dropped_packets_due_to_RL",
+				Help: "The number of packets that have been dropped due to rate limiting",
 			},
 			[]string{"isd_as", "scr_isd_as"},
 		),

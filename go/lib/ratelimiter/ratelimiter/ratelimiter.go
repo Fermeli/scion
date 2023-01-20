@@ -8,6 +8,10 @@ import (
 )
 
 type RateLimiter struct {
+	// The 10 bytes array is derived from the SrcIA of type addr.IA and the EgressID
+	// of type uint16. The SrcIA is 8 bytes long and the EgressID is 2 bytes long.
+	// The identifier of the rate limiter is built from the concatenation of these
+	// two values so it is 10 bytes long.
 	buckets map[[10]byte]*tokenbucket.TokenBucket
 }
 

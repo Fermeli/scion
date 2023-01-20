@@ -66,8 +66,10 @@ func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurs
 	if err != nil {
 		return &colpb.Success{}, err
 	}
-
 	err = rateLimiter.Ratelimiter.SetBurstSize(identifier, req.Cbs)
+
+	r.dp.SetCbsMetric(req.Address, uint64(req.Cbs))
+
 	return &colpb.Success{}, err
 }
 
@@ -89,10 +91,14 @@ func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.
 	}
 
 	if !rateLimiter.Ratelimiter.Contains(identifier) {
+		r.dp.InitTrafficMonitoringMetrics(req.Address, uint64(req.Cbs), req.Rate)
 		rateLimiter.Ratelimiter.AddRatelimit(identifier, req.Rate, req.Cbs, time.Now())
 		return &colpb.Success{}, nil
 	}
 	err = rateLimiter.Ratelimiter.SetBurstSizeAndRate(identifier, req.Cbs, req.Rate)
+	r.dp.SetCbsMetric(req.Address, uint64(req.Cbs))
+	r.dp.SetRateMetric(req.Address, req.Rate)
+
 	return &colpb.Success{}, err
 }
 
@@ -112,6 +118,8 @@ func (r *rateLimiterServer) SetRate(ctx context.Context, req *colpb.SetRateReque
 		return &colpb.Success{}, err
 	}
 	err = rateLimiter.Ratelimiter.SetRate(identifier, req.Rate)
+	r.dp.SetRateMetric(req.Address, req.Rate)
+
 	return &colpb.Success{}, err
 }
 
