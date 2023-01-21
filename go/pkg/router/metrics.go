@@ -186,15 +186,15 @@ func NewMetrics() *Metrics {
 		),
 		DroppedBytesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "router_dropped_bytes_due_to_RL",
-				Help: "Number of bytes dropped by the router due to RL.",
+				Name: "router_dropped_bytes_total",
+				Help: "Number of bytes dropped by the router.",
 			},
 			[]string{"interface", "isd_as", "neighbor_isd_as"},
 		),
 		DroppedBytesDueToRL: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "dropped_packets_due_to_RL",
-				Help: "The number of packets that have been dropped due to rate limiting",
+				Name: "dropped_bytes_due_to_RL",
+				Help: "The number of bytes that have been dropped due to rate limiting",
 			},
 			[]string{"isd_as", "scr_isd_as"},
 		),
