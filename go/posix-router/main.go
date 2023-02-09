@@ -68,7 +68,11 @@ func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurs
 	}
 	err = rateLimiter.Ratelimiter.SetBurstSize(identifier, req.Cbs)
 
-	r.dp.SetCbsMetric(req.Address, uint64(req.Cbs))
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+
+	err = r.dp.SetCbsMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, uint64(req.Cbs))
 
 	return &colpb.Success{}, err
 }
@@ -79,7 +83,7 @@ func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.
 	if !ok {
 		r.dp.InitRateLimiter(uint16(req.Ingress))
 		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
-
+		return &colpb.Success{}, fmt.Errorf("aaa")
 	}
 
 	rateLimiter.Lock()
@@ -91,13 +95,22 @@ func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.
 	}
 
 	if !rateLimiter.Ratelimiter.Contains(identifier) {
-		r.dp.InitTrafficMonitoringMetrics(req.Address, uint64(req.Cbs), req.Rate)
+		err = r.dp.InitRateLimiterMetrics(uint16(req.Ingress), uint16(req.Egress), req.Address, uint64(req.Cbs), req.Rate)
+		if err != nil {
+			return &colpb.Success{}, err
+		}
 		rateLimiter.Ratelimiter.AddRatelimit(identifier, req.Rate, req.Cbs, time.Now())
 		return &colpb.Success{}, nil
 	}
 	err = rateLimiter.Ratelimiter.SetBurstSizeAndRate(identifier, req.Cbs, req.Rate)
-	r.dp.SetCbsMetric(req.Address, uint64(req.Cbs))
-	r.dp.SetRateMetric(req.Address, req.Rate)
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	err = r.dp.SetCbsMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, uint64(req.Cbs))
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	r.dp.SetRateMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, req.Rate)
 
 	return &colpb.Success{}, err
 }
@@ -118,7 +131,10 @@ func (r *rateLimiterServer) SetRate(ctx context.Context, req *colpb.SetRateReque
 		return &colpb.Success{}, err
 	}
 	err = rateLimiter.Ratelimiter.SetRate(identifier, req.Rate)
-	r.dp.SetRateMetric(req.Address, req.Rate)
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	err = r.dp.SetRateMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, req.Rate)
 
 	return &colpb.Success{}, err
 }
