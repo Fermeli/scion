@@ -89,6 +89,7 @@ func realMain(ctx context.Context, cfg *config.Config) error {
 		<-errCtx.Done()
 		return cleanup.Do()
 	})
+
 	return g.Wait()
 }
 
