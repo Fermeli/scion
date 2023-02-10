@@ -19,18 +19,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
 
 	"github.com/scionproto/scion/go/lib/log"
 	"github.com/scionproto/scion/go/lib/serrors"
 	"github.com/scionproto/scion/go/lib/topology"
 	"github.com/scionproto/scion/go/pkg/app"
 	"github.com/scionproto/scion/go/pkg/app/launcher"
+	colpb "github.com/scionproto/scion/go/pkg/proto/colibri"
 	"github.com/scionproto/scion/go/pkg/router"
 	"github.com/scionproto/scion/go/pkg/router/api"
 	"github.com/scionproto/scion/go/pkg/router/config"
@@ -38,7 +42,102 @@ import (
 	"github.com/scionproto/scion/go/pkg/service"
 )
 
+const port = 5045
+
 var globalCfg config.Config
+
+type rateLimiterServer struct {
+	colpb.UnimplementedRateLimiterServiceServer
+	dp *router.DataPlane
+}
+
+func (r *rateLimiterServer) SetBurstSize(ctx context.Context, req *colpb.SetBurstSizeRequest) (*colpb.Success, error) {
+	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
+	if !ok {
+		r.dp.InitRateLimiter(uint16(req.Ingress))
+		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+	}
+
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+	identifier, err := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
+
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	err = rateLimiter.Ratelimiter.SetBurstSize(identifier, req.Cbs)
+
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+
+	err = r.dp.SetCbsMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, uint64(req.Cbs))
+
+	return &colpb.Success{}, err
+}
+
+func (r *rateLimiterServer) SetBurstSizeAndRate(ctx context.Context, req *colpb.SetBurstSizeAndRateRequest) (*colpb.Success, error) {
+	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
+	if !ok {
+		r.dp.InitRateLimiter(uint16(req.Ingress))
+		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+		return &colpb.Success{}, fmt.Errorf("aaa")
+	}
+
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+	identifier, err := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
+
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+
+	if !rateLimiter.Ratelimiter.Contains(identifier) {
+		err = r.dp.InitRateLimiterMetrics(uint16(req.Ingress), uint16(req.Egress), req.Address, uint64(req.Cbs), req.Rate)
+		if err != nil {
+			return &colpb.Success{}, err
+		}
+		rateLimiter.Ratelimiter.AddRatelimit(identifier, req.Rate, req.Cbs, time.Now())
+		return &colpb.Success{}, nil
+	}
+	err = rateLimiter.Ratelimiter.SetBurstSizeAndRate(identifier, req.Cbs, req.Rate)
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	err = r.dp.SetCbsMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, uint64(req.Cbs))
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	r.dp.SetRateMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, req.Rate)
+
+	return &colpb.Success{}, err
+}
+
+func (r *rateLimiterServer) SetRate(ctx context.Context, req *colpb.SetRateRequest) (*colpb.Success, error) {
+	rateLimiter, ok := r.dp.SyncRateLimiters[uint16(req.Ingress)]
+
+	if !ok {
+		r.dp.InitRateLimiter(uint16(req.Ingress))
+		rateLimiter, _ = r.dp.SyncRateLimiters[uint16(req.Ingress)]
+	}
+
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+	identifier, err := r.dp.BuildIdentifier(uint16(req.Egress), req.Address)
+
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	err = rateLimiter.Ratelimiter.SetRate(identifier, req.Rate)
+	if err != nil {
+		return &colpb.Success{}, err
+	}
+	err = r.dp.SetRateMetric(uint16(req.Ingress), uint16(req.Egress), req.Address, req.Rate)
+
+	return &colpb.Success{}, err
+}
 
 func main() {
 	application := launcher.Application{
@@ -124,6 +223,21 @@ func realMain(ctx context.Context) error {
 		if err := dp.DataPlane.Run(errCtx); err != nil {
 			return serrors.WrapStr("running dataplane", err)
 		}
+		return nil
+	})
+
+	// Run a grpc server to listen to rate limit adjsutment requests
+	g.Go(func() error {
+		defer log.HandlePanic()
+		lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", controlConfig.BR.InternalAddr.IP.String(), port)) //grpcServerAddr)
+		if err != nil {
+			return serrors.WrapStr("failed to listen:", err)
+		}
+		var opts []grpc.ServerOption
+		rateLimiterServer := rateLimiterServer{dp: &dp.DataPlane}
+		grpcServer := grpc.NewServer(opts...)
+		colpb.RegisterRateLimiterServiceServer(grpcServer, &rateLimiterServer)
+		grpcServer.Serve(lis)
 		return nil
 	})
 

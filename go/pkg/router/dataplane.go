@@ -33,8 +33,6 @@ import (
 	"syscall"
 	"time"
 
-	//"os"
-
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/prometheus/client_golang/prometheus"
@@ -76,9 +74,35 @@ const (
 	// hopFieldDefaultExpTime is the default validity of the hop field
 	// and 63 is equivalent to 6h.
 	hopFieldDefaultExpTime = 63
-)
 
-//var remaining = 20000000
+	// size in bytes of the EgressID
+	egressIDSize = 2
+
+	// size in bytes of the ingressID
+	ingressIDSize = 2
+
+	// size in bytes of the srcIA
+	srcIASize = 8
+
+	// size in byte of the identifier used to identify a rate limit. It is equal
+	// to 10 because the identifier is built from the concatenation of the
+	// srcIA (size 8 bytes) and of the egressID (size 2 bytes)
+	sizeOfRLIdentifier = srcIASize + egressIDSize
+
+	// size in byte of the identifier of the identifier of the metrics related
+	// to traffic monitoring. The value of 12 is derived from the 8 bytes of
+	// srcIA, the 2 byte of ingressID and the 2 bytes of egressID
+	sizeOfMonitoringMetricIdentifier = egressIDSize + ingressIDSize + srcIASize
+
+	// The max duration during which a packet is considered valid.
+	packetLifetime = 1 * time.Second
+
+	// The number of filters used in the Sliding Bloom filter
+	numberOfBloomFilters = 3
+
+	// The false postitive probability of the Duplicate detection
+	falsePositiveProbalityDD = 0.01
+)
 
 type bfdSession interface {
 	Run() error
@@ -94,6 +118,13 @@ type BatchConn interface {
 	Close() error
 }
 
+// syncRateLimiter is a rate limiter that can be locked to avoid data races
+// check go/lib/ratelimiter/ratelimiter/ratelimiter.go for doc
+type syncRateLimiter struct {
+	sync.Mutex
+	Ratelimiter ratelimiter.RateLimiter
+}
+
 // DataPlane contains a SCION Border Router's forwarding logic. It reads packets
 // from multiple sockets, performs routing, and sends them to their destinations
 // (after updating the path, if that is needed).
@@ -102,22 +133,27 @@ type BatchConn interface {
 // Currently, only the following features are supported:
 //  - initializing connections; MUST be done prior to calling Run
 type DataPlane struct {
-	external                 map[uint16]BatchConn
-	linkTypes                map[uint16]topology.LinkType
-	neighborIAs              map[uint16]addr.IA
-	internal                 BatchConn
-	internalIP               net.IP
-	internalNextHops         map[uint16]*net.UDPAddr
-	svc                      *services
-	macFactory               func() hash.Hash
-	colibriKey               cipher.Block
-	bfdSessions              map[uint16]bfdSession
-	localIA                  addr.IA
-	mtx                      sync.Mutex
-	running                  bool
-	Metrics                  *Metrics
-	forwardingMetrics        map[uint16]forwardingMetrics
-	trafficMonitoringMetrics map[string]trafficMonitoringMetrics
+	external                  map[uint16]BatchConn
+	linkTypes                 map[uint16]topology.LinkType
+	neighborIAs               map[uint16]addr.IA
+	internal                  BatchConn
+	internalIP                net.IP
+	internalNextHops          map[uint16]*net.UDPAddr
+	svc                       *services
+	macFactory                func() hash.Hash
+	colibriKey                cipher.Block
+	bfdSessions               map[uint16]bfdSession
+	localIA                   addr.IA
+	mtx                       sync.Mutex
+	running                   bool
+	Metrics                   *Metrics
+	forwardingMetrics         map[uint16]forwardingMetrics
+	rateLimiterMetrics        map[[sizeOfMonitoringMetricIdentifier]byte]rateLimiterMetrics
+	duplicateDetectionMetrics map[[sizeOfMonitoringMetricIdentifier]byte]duplicateDetectionMetrics
+	trafficMonitoringMetrics  map[[sizeOfMonitoringMetricIdentifier]byte]trafficMonitoringMetrics
+	// SyncRateLimiters maps an ingressID to its syncRateLimiter
+	SyncRateLimiters map[uint16]*syncRateLimiter
+	bloomfilter      bloomfilter.SlidingBloomFilter
 }
 
 var (
@@ -487,8 +523,15 @@ func (d *DataPlane) Run(ctx context.Context) error {
 	d.mtx.Lock()
 	d.running = true
 	d.initMetrics()
-
+	d.SyncRateLimiters = make(map[uint16]*syncRateLimiter)
+	bloomFilter := bloomfilter.NewOptimalSlidingBloomFilter(0.01, 11000000, 3*time.Second, time.Now(), 3)
+	d.bloomfilter = bloomFilter
+	d.trafficMonitoringMetrics = make(map[[sizeOfMonitoringMetricIdentifier]byte]trafficMonitoringMetrics)
+	d.rateLimiterMetrics = make(map[[sizeOfMonitoringMetricIdentifier]byte]rateLimiterMetrics)
+	d.duplicateDetectionMetrics = make(map[[sizeOfMonitoringMetricIdentifier]byte]duplicateDetectionMetrics)
 	read := func(ingressID uint16, rd BatchConn) {
+
+		d.InitRateLimiter(ingressID)
 
 		msgs := conn.NewReadMessages(inputBatchCnt)
 		for _, msg := range msgs {
@@ -517,7 +560,25 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				inputCounters.InputBytesTotal.Add(float64(p.N))
 
 				srcAddr := p.Addr.(*net.UDPAddr)
-				result, err := processor.processPkt(p.Buffers[0][:p.N], srcAddr, d.trafficMonitoringMetrics) //inputCounters)
+				rawPkt := p.Buffers[0][:p.N]
+				result, err := processor.processPkt(rawPkt, srcAddr)
+
+				stringAddress := processor.scionLayer.SrcIA.String()
+				metricsIdentifier, err1 := d.BuildIdentifierMetrics(result.EgressID, ingressID, stringAddress)
+				if err1 == nil {
+					_, ok := d.trafficMonitoringMetrics[metricsIdentifier]
+					if !ok {
+						d.InitMonitoringMetrics(ingressID, result.EgressID, stringAddress)
+					}
+					d.trafficMonitoringMetrics[metricsIdentifier].ReceivedBytes.Add(float64(p.N))
+
+					_, ok = d.duplicateDetectionMetrics[metricsIdentifier]
+
+					if !ok {
+						d.InitDuplicateDetectionMetrics(ingressID, result.EgressID, stringAddress)
+					}
+
+				}
 
 				switch {
 				case err == nil:
@@ -531,6 +592,9 @@ func (d *DataPlane) Run(ctx context.Context) error {
 				default:
 					log.Debug("Error processing packet", "err", err)
 					inputCounters.DroppedPacketsTotal.Inc()
+					if err1 == nil {
+						d.trafficMonitoringMetrics[metricsIdentifier].DroppedBytes.Add(float64(p.N))
+					}
 					continue
 				}
 				if result.OutConn == nil { // e.g. BFD case no message is forwarded
@@ -558,12 +622,18 @@ func (d *DataPlane) Run(ctx context.Context) error {
 						// error metric
 					}
 					inputCounters.DroppedPacketsTotal.Inc()
+					if err1 == nil {
+						d.trafficMonitoringMetrics[metricsIdentifier].DroppedBytes.Add(float64(p.N))
+					}
 					continue
 				}
 				// ok metric
 				outputCounters := d.forwardingMetrics[result.EgressID]
 				outputCounters.OutputPacketsTotal.Inc()
 				outputCounters.OutputBytesTotal.Add(float64(len(result.OutPkt)))
+				if err1 == nil {
+					d.trafficMonitoringMetrics[metricsIdentifier].OutputBytes.Add(float64(p.N))
+				}
 			}
 		}
 	}
@@ -597,9 +667,8 @@ func (d *DataPlane) Run(ctx context.Context) error {
 // counters are already instantiated for all the relevant interfaces so this
 // will not have to be repeated during packet forwarding.
 func (d *DataPlane) initMetrics() {
-	addressesToRateLimit := []string{"1-ff00:0:110"}
 	d.forwardingMetrics = make(map[uint16]forwardingMetrics)
-	d.trafficMonitoringMetrics = make(map[string]trafficMonitoringMetrics)
+	d.trafficMonitoringMetrics = make(map[[sizeOfMonitoringMetricIdentifier]byte]trafficMonitoringMetrics)
 	labels := interfaceToMetricLabels(0, d.localIA, d.neighborIAs)
 	d.forwardingMetrics[0] = initForwardingMetrics(d.Metrics, labels)
 	for id := range d.external {
@@ -609,17 +678,11 @@ func (d *DataPlane) initMetrics() {
 		labels = interfaceToMetricLabels(id, d.localIA, d.neighborIAs)
 		d.forwardingMetrics[id] = initForwardingMetrics(d.Metrics, labels)
 	}
+}
 
-	for _, address := range addressesToRateLimit {
-		if address != d.localIA.String() {
-			labels = prometheus.Labels{
-				"isd_as":     d.localIA.String(),
-				"scr_isd_as": address,
-			}
-			d.trafficMonitoringMetrics[address] = initTrafficMonitoringMetrics(d.Metrics, labels)
-		}
-
-	}
+// InitRateLimiter initializes the rate limiter for the given ingressID
+func (d *DataPlane) InitRateLimiter(ingressID uint16) {
+	d.SyncRateLimiters[ingressID] = &syncRateLimiter{Ratelimiter: ratelimiter.NewRateLimiter()}
 }
 
 type processResult struct {
@@ -631,12 +694,6 @@ type processResult struct {
 
 func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
 
-	ratelimiter := ratelimiter.NewRateLimiter()
-	ratelimiter.AddRatelimit("1-ff00:0:110", 500000, 2000, time.Now())
-	bloomFilter := bloomfilter.NewOptimalSlidingBloomFilter(0.01, 11000000, 3*time.Second, time.Now(), 3)
-
-	//ratelimiter.SetBurstSizeAndRate("a", 20000000, 1000000)
-
 	return &scionPacketProcessor{
 		d:         d,
 		ingressID: ingressID,
@@ -646,8 +703,6 @@ func newPacketProcessor(d *DataPlane, ingressID uint16) *scionPacketProcessor {
 			scionInput: make([]byte, path.MACBufferSize),
 			epicInput:  make([]byte, libepic.MACBufferSize),
 		},
-		ratelimiter: ratelimiter,
-		bloomfilter: bloomFilter,
 	}
 }
 
@@ -667,7 +722,7 @@ func (p *scionPacketProcessor) reset() error {
 }
 
 func (p *scionPacketProcessor) processPkt(rawPkt []byte,
-	srcAddr *net.UDPAddr, trafficMonitoringMetrics map[string]trafficMonitoringMetrics) (processResult, error) {
+	srcAddr *net.UDPAddr) (processResult, error) {
 
 	p.reset()
 	p.rawPkt = rawPkt
@@ -698,24 +753,41 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 		return p.processOHP()
 	case scion.PathType:
+		res, err := p.processSCION()
+
+		if err != nil {
+			return res, err
+		}
+
 		address := p.scionLayer.SrcIA
 		stringAddress := address.String()
+		identifier, err := p.d.BuildIdentifier(res.EgressID, stringAddress)
 
-		if stringAddress == "1-ff00:0:110" {
+		if err != nil {
+			return res, err
+		}
 
-			appliable := p.ratelimiter.Apply(stringAddress, int64(len(rawPkt)), time.Now())
+		rateLimiter, _ := p.d.SyncRateLimiters[p.ingressID]
+
+		rateLimiter.Lock()
+		defer rateLimiter.Unlock()
+		if rateLimiter.Ratelimiter.Contains(identifier) {
+			appliable := rateLimiter.Ratelimiter.Apply(identifier, int64(len(rawPkt)), time.Now())
 			if !appliable {
-
-				metrics, ok := trafficMonitoringMetrics["1-ff00:0:110"]
-
+				identifierMetrics, err := p.d.BuildIdentifierMetrics(res.EgressID, p.ingressID, stringAddress)
+				if err != nil {
+					return processResult{}, err
+				}
+				metrics, ok := p.d.rateLimiterMetrics[identifierMetrics]
 				if ok {
 					metrics.DroppedPacketsDueToRL.Inc()
-					return processResult{}, rateLimited
+					metrics.DroppedBytesDueToRL.Add(float64(len(rawPkt)))
 				}
+				return processResult{}, rateLimited
 			}
 		}
 
-		return p.processSCION()
+		return res, err
 	case epic.PathType:
 		return p.processEPIC()
 	case colibri.PathType:
@@ -729,24 +801,29 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		}
 
 		packetIdentifier := append(append(byteAddress, path.PacketTimestamp[:]...), path.InfoField.ResIdSuffix...)
-		duplicatedPacket, err := p.bloomfilter.HasBeenSeen(packetIdentifier, time.Now())
+		duplicatedPacket, err := p.d.bloomfilter.HasBeenSeen(packetIdentifier, time.Now())
 
 		if err != nil {
 			return processResult{}, err
 		}
 
+		res, err := p.processCOLIBRI()
+
 		if duplicatedPacket {
+			stringAddress := address.String()
+			identifierMetrics, err := p.d.BuildIdentifierMetrics(res.EgressID, p.ingressID, stringAddress)
 
-			metrics, ok := trafficMonitoringMetrics["1-ff00:0:110"]
-
-			if ok {
-				metrics.DroppedPacketsDueToDD.Inc()
-				return processResult{}, duplicateDetected
+			if err != nil {
+				return processResult{}, err
 			}
 
+			metrics, _ := p.d.duplicateDetectionMetrics[identifierMetrics]
+			metrics.DroppedPacketsDueToDD.Inc()
+
+			return processResult{}, duplicateDetected
 		}
 
-		return p.processCOLIBRI()
+		return res, err
 	default:
 		return processResult{}, serrors.WithCtx(unsupportedPathType, "type", pathType)
 	}
@@ -797,7 +874,6 @@ func (p *scionPacketProcessor) processIntraBFD(src *net.UDPAddr, data []byte) er
 
 func (p *scionPacketProcessor) processSCION() (processResult, error) {
 
-	//heeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeere
 	var ok bool
 	p.path, ok = p.scionLayer.Path.(*scion.Raw)
 	if !ok {
@@ -905,10 +981,6 @@ type scionPacketProcessor struct {
 	cachedMac []byte
 	// macBuffers avoid allocating memory during processing.
 	macBuffers macBuffers
-
-	ratelimiter ratelimiter.RateLimiter
-
-	bloomfilter bloomfilter.SlidingBloomFilter
 }
 
 // macBuffers are preallocated buffers for the in- and outputs of MAC functions.
@@ -1458,6 +1530,117 @@ func (d *DataPlane) resolveLocalDst(s slayers.SCION) (*net.UDPAddr, error) {
 	}
 }
 
+// BuildIdentifier builds and returns the 10 bytes array identifier used for the rate
+// limiter from the given egressId and address
+func (d *DataPlane) BuildIdentifier(egress uint16, address string) ([sizeOfRLIdentifier]byte, error) {
+
+	var identifierBytes [sizeOfRLIdentifier]byte
+	srcAS, err := addr.ParseIA(address)
+
+	if err != nil {
+		return identifierBytes, err
+	}
+
+	egressBytes := make([]byte, egressIDSize)
+	srcASBytes := make([]byte, srcIASize)
+
+	binary.LittleEndian.PutUint64(srcASBytes, uint64(srcAS))
+	binary.LittleEndian.PutUint16(egressBytes, egress)
+
+	copy(identifierBytes[:], append(srcASBytes, egressBytes...))
+
+	return identifierBytes, nil
+}
+
+func (d *DataPlane) BuildIdentifierMetrics(egress uint16, ingress uint16, address string) ([sizeOfMonitoringMetricIdentifier]byte, error) {
+	var identifierBytes [sizeOfMonitoringMetricIdentifier]byte
+	ingressBytes := make([]byte, ingressIDSize)
+	binary.LittleEndian.PutUint16(ingressBytes, ingress)
+	egressAdress, err := d.BuildIdentifier(egress, address)
+	if err != nil {
+		return identifierBytes, err
+	}
+	copy(identifierBytes[:], append(ingressBytes, egressAdress[:]...))
+	return identifierBytes, nil
+}
+
+func (d *DataPlane) InitMonitoringMetrics(ingress uint16, egress uint16, address string) error {
+	metrics := d.Metrics
+	labels := d.buildMonitoringLabels(address, egress, ingress)
+	identifier, err := d.BuildIdentifierMetrics(egress, ingress, address)
+	if err != nil {
+		return err
+	}
+	monitoringMetrics := trafficMonitoringMetrics{}
+	monitoringMetrics.DroppedBytes = metrics.DroppedBytes.With(labels)
+	monitoringMetrics.ReceivedBytes = metrics.ReceivedBytes.With(labels)
+	monitoringMetrics.OutputBytes = metrics.OutputBytes.With(labels)
+	monitoringMetrics.DroppedBytes.Add(0)
+	monitoringMetrics.ReceivedBytes.Add(0)
+	monitoringMetrics.OutputBytes.Add(0)
+
+	d.trafficMonitoringMetrics[identifier] = monitoringMetrics
+	return nil
+}
+
+func (d *DataPlane) InitRateLimiterMetrics(ingress uint16, egress uint16, address string, cbs uint64, rate float64) error {
+
+	metrics := d.Metrics
+	labels := d.buildMonitoringLabels(address, egress, ingress)
+	identifier, err := d.BuildIdentifierMetrics(egress, ingress, address)
+	if err != nil {
+		return err
+	}
+	rateLimiterMetrics, _ := d.rateLimiterMetrics[identifier]
+
+	rateLimiterMetrics.DroppedPacketsDueToRL = metrics.DroppedPacketsDueToRL.With(labels)
+	rateLimiterMetrics.DroppedBytesDueToRL = metrics.DroppedBytesDueToRL.With(labels)
+	rateLimiterMetrics.Cbs = metrics.Cbs.With(labels)
+	rateLimiterMetrics.Rate = metrics.Rate.With(labels)
+
+	rateLimiterMetrics.DroppedPacketsDueToRL.Add(0)
+	rateLimiterMetrics.DroppedBytesDueToRL.Add(0)
+	rateLimiterMetrics.Cbs.Set(float64(cbs))
+	rateLimiterMetrics.Rate.Set(rate)
+
+	d.rateLimiterMetrics[identifier] = rateLimiterMetrics
+
+	return nil
+}
+
+func (d *DataPlane) InitDuplicateDetectionMetrics(ingress uint16, egress uint16, address string) error {
+	metrics := d.Metrics
+	labels := d.buildMonitoringLabels(address, egress, ingress)
+	identifier, err := d.BuildIdentifierMetrics(egress, ingress, address)
+	if err != nil {
+		return err
+	}
+	duplicateDetectionMetrics, _ := d.duplicateDetectionMetrics[identifier]
+
+	duplicateDetectionMetrics.DroppedPacketsDueToDD = metrics.DroppedPacketsDueToDD.With(labels)
+	duplicateDetectionMetrics.DroppedPacketsDueToDD.Add(0)
+	d.duplicateDetectionMetrics[identifier] = duplicateDetectionMetrics
+	return nil
+}
+
+func (d *DataPlane) SetCbsMetric(ingress uint16, egress uint16, address string, cbs uint64) error {
+	identifier, err := d.BuildIdentifierMetrics(egress, ingress, address)
+	if err != nil {
+		return err
+	}
+	d.rateLimiterMetrics[identifier].Cbs.Set(float64(cbs))
+	return nil
+}
+
+func (d *DataPlane) SetRateMetric(ingress uint16, egress uint16, address string, rate float64) error {
+	identifier, err := d.BuildIdentifierMetrics(egress, ingress, address)
+	if err != nil {
+		return err
+	}
+	d.rateLimiterMetrics[identifier].Rate.Set(rate)
+	return nil
+}
+
 func addEndhostPort(dst *net.IPAddr) *net.UDPAddr {
 	return &net.UDPAddr{IP: dst.IP, Port: topology.EndhostPort}
 }
@@ -1683,12 +1866,29 @@ type forwardingMetrics struct {
 	InputPacketsTotal   prometheus.Counter
 	OutputPacketsTotal  prometheus.Counter
 	DroppedPacketsTotal prometheus.Counter
+	DroppedBytesTotal   prometheus.Counter
 }
 
 // forwardingMetrics contains the subset of Metrics relevant for traffic
 // monitoring, instantiated with some AS-specific labels.
 type trafficMonitoringMetrics struct {
+	ReceivedBytes prometheus.Counter
+	DroppedBytes  prometheus.Counter
+	OutputBytes   prometheus.Counter
+}
+
+// rateLimiterMetrics contains the subset of Metrics relevant for traffic
+// monitoring, instantiated with some AS-specific labels.
+type rateLimiterMetrics struct {
 	DroppedPacketsDueToRL prometheus.Counter
+	DroppedBytesDueToRL   prometheus.Counter
+	Cbs                   prometheus.Gauge
+	Rate                  prometheus.Gauge
+}
+
+// forwardingMetrics contains the subset of Metrics relevant for traffic
+// monitoring, instantiated with some AS-specific labels.
+type duplicateDetectionMetrics struct {
 	DroppedPacketsDueToDD prometheus.Counter
 }
 
@@ -1705,17 +1905,6 @@ func initForwardingMetrics(metrics *Metrics, labels prometheus.Labels) forwardin
 	c.OutputBytesTotal.Add(0)
 	c.OutputPacketsTotal.Add(0)
 	c.DroppedPacketsTotal.Add(0)
-	return c
-}
-
-func initTrafficMonitoringMetrics(metrics *Metrics, labels prometheus.Labels) trafficMonitoringMetrics {
-	c := trafficMonitoringMetrics{
-		DroppedPacketsDueToRL: metrics.DroppedPacketsDueToRL.With(labels),
-		DroppedPacketsDueToDD: metrics.DroppedPacketsDueToDD.With(labels),
-	}
-
-	c.DroppedPacketsDueToRL.Add(0)
-	c.DroppedPacketsDueToDD.Add(0)
 	return c
 }
 
@@ -1740,5 +1929,14 @@ func serviceMetricLabels(localIA addr.IA, svc addr.HostSVC) prometheus.Labels {
 	return prometheus.Labels{
 		"isd_as":  localIA.String(),
 		"service": svc.BaseString(),
+	}
+}
+
+func (d *DataPlane) buildMonitoringLabels(address string, egressID uint16, ingressID uint16) prometheus.Labels {
+	return prometheus.Labels{
+		"isd_as":     d.localIA.String(),
+		"src_isd_as": address,
+		"ingressID":  fmt.Sprint(ingressID),
+		"egressID":   fmt.Sprint(egressID),
 	}
 }
