@@ -51,7 +51,7 @@ Installation:
 ```
 git clone git@github.com:netsec-ethz/scion-apps.git
 ```
-The instructions to set up the bandwidth tester can be found [here](https://github.com/netsec-ethz/scion-apps#installation)
+The instructions to set up the bandwidth tester can be found [here](https://github.com/netsec-ethz/scion-apps#installation).
 
 Start Application:
 Once the network is running with a certain topology, you need to pick one AS to be the client and one AS to be the server. A mapping from an AS IPV6 address to its IPV4 address can be found in gen/sciond_addresses.json. You also need to choose a port for the server and the client. Given servAddrIPV4, servAddrIPV6, clientAddrIPV4, clientAddrIPV6 the server address and the client addresses, and servPort and clientPort the ports that you chosse, open two terminals at the same path where you cloned the repository and run the following commands:
