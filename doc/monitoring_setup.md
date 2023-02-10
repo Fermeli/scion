@@ -1,5 +1,29 @@
 ### SCION
-First of all SCION must be set up by following the instructions can be found [here](https://scion.docs.anapaya.net/en/latest/build/setup.html). 
+First of all SCION must be set up by following the instructions written [here](https://scion.docs.anapaya.net/en/latest/build/setup.html). 
+
+Once SCION is setup, you can clone the repository:
+```
+git clone git@github.com:Fermeli/scion.git
+```
+Switch to the development branch:
+```
+cd scion
+git checkout development_branch
+```
+
+Start the bazel server:
+```
+sudo ./scion.sh bazel_remote
+```
+
+Several topologies are available for the network. They can be found in the topology folder. Each .topo file is a different network topology. To set a cetain topology run the following command:
+```
+sudo ./scion.sh topology -c ./topology/tiny4.topo 
+```
+Finally, run the network:
+```
+ sudo ./scion.sh run
+```
 
 ### Prometheus
 Version: 2.37 (LTS)
@@ -71,8 +95,8 @@ sudo -E go run bwtester/bwtestclient/bwtestclient.go -s servAddrIPV6,[servAddrIP
 ### Setting rate limit
 Once the network is running, rate limits can be set by using the script located in go/scriptRL/main.go.
 The script takes the following argument:
-* -s which is the IPV4 address of the AS which performs the monitoring
-* -address which specifies the IPV6 address of the address on which the rate limit is set
+* -s which is the IPV4 address of the AS that performs the monitoring
+* -address which specifies the IPV6 address of the AS on which the rate limit is set
 * -ingress the ID of the ingress on which the rate limit is performed
 * -egress the ID of the egress on which the rate limit is performed
 * -cbs the CBS at which the rate limit is set
@@ -80,3 +104,5 @@ The script takes the following argument:
 
 The addresses of the ASes can be found in gen/sciond_addresses.json.
 
+### Example
+In this example 
