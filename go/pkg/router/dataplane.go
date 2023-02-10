@@ -792,7 +792,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 		return p.processEPIC()
 	case colibri.PathType:
 		address := p.scionLayer.SrcIA
-		byteAddress := make([]byte, 4)
+		byteAddress := make([]byte, srcIASize)
 		binary.LittleEndian.PutUint16(byteAddress, uint16(address))
 		path, ok := p.scionLayer.Path.(*colibri.ColibriPath)
 
