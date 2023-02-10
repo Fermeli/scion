@@ -18,8 +18,9 @@ sudo ./scion.sh bazel_remote
 
 Several topologies are available for the network. They can be found in the topology folder. Each .topo file is a different network topology. To set a cetain topology run the following command:
 ```
-sudo ./scion.sh topology -c ./topology/tiny4.topo 
+sudo ./scion.sh topology -c ./topology/example.topo 
 ```
+where example.topo is the topology that you choose to run.
 Finally, run the network:
 ```
  sudo ./scion.sh run
@@ -44,6 +45,7 @@ prometheus --version
 ```
 
 Start Application:
+In the gen folder, a folder per AS is defined, each of them contains a prometheus config file prometheus.yml. Open a terminal at the path of the folder of the AS you are interested in and run the following command:
 ```
 prometheus --config.file=prometheus.yml
 ```
@@ -67,6 +69,7 @@ sudo systemctl status grafana-server
 ```
 
 The Grafana web server is reachable on port `3000`. Per default, use username `admin` with password `admin` to log in.
+A Grafana dashboard is defined as a json file in the folder grafana_dashboard. It is called monitoring.json. Once you access Grafana, this dashboard can  be imported.
 
 For Grafana, first the Prometheus server has to be added as data source.
 
@@ -105,4 +108,43 @@ The script takes the following argument:
 The addresses of the ASes can be found in gen/sciond_addresses.json.
 
 ### Example
-In this example 
+In this example we test the rate limiter on the topology topology/tiny4.topo
+Start the bazel server:
+```
+./scion.sh bazel_remote
+```
+Select topology tiny4.topo:
+```
+./scion.sh topology -c ./topology/tiny4.topo
+```
+Run the network:
+```
+./scion.sh run
+```
+Start the grafana server
+```
+systemctl daemon-reload
+systemctl start grafana-server
+```
+Start the prometheus for the AS ff00_0_111.
+```
+prometheus --config.file=gen/ASff00_0_111/prometheus.yml
+```
+Open the Grafana at http://localhost:3000. Connect using "admin" as both username and password. Imort the dashboard grafana_dashboard/monitoring.json. Now you should be able to access the dashboard and to see some of the plots. You should see that AS ff00_0_110 sends packet to AS ff00_0_111 using ingressID 0 and egressID 41.
+
+Set a rate limit from AS ff00_0_111 to AS ff00_0_110 on ingressID 0 and egressID 41:
+```
+go run go/scriptRL/main.go -s 127.0.0.17 -address 1-ff00:0:110 -cbs 400000 -rate 3000 -ingress 41 -egress 0
+```
+
+Open a terminal at the root of the scion-apps directory that you cloned and start the bandwidth test server in ASff00_0_111:
+```
+export SCION_DAEMON_ADDRESS=127.0.0.20:30255
+sudo -E go run bwtester/bwtestserver/bwtestserver.go --listen 127.0.0.20:30255
+```
+Open another terminal at the same path and run the bandwidth test client in ASff00_0_110:
+```
+export SCION_DAEMON_ADDRESS=127.0.0.13:30255
+sudo -E ./scion-bwtestclient -s 1-ff00:0:111,[127.0.0.20]:30255 -cs 1Mbps
+```
+Here we sent 1Mbps from AS ff00_0_110 to AS ff00_0_111. Some of the packets might be dropped by AS ff00_0_111. These information should be visible in the Grafana plots.
