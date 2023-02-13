@@ -81,7 +81,7 @@ git clone git@github.com:netsec-ethz/scion-apps.git
 The instructions to set up the bandwidth tester can be found [here](https://github.com/netsec-ethz/scion-apps#installation).
 
 Start Application:
-Once the network is running with a certain topology, you need to pick one AS to be the client and one AS to be the server. A mapping from an AS IPV6 address to its IPV4 address can be found in gen/sciond_addresses.json. You also need to choose a port for the server and the client. Given servAddrIPV4, servAddrIPV6, clientAddrIPV4, clientAddrIPV6 the server address and the client addresses, and servPort and clientPort the ports that you chosse, open two terminals at the same path where you cloned the repository and run the following commands:
+Once the network is running with a certain topology, you need to pick one AS to be the client and one AS to be the server. A mapping from an AS IPV6 address to its IPV4 address can be found in gen/sciond_addresses.json. You also need to choose a port for the server and the client. Given servAddrIPV4, servAddrIPV6, clientAddrIPV4, clientAddrIPV6 the server address and the client addresses, and servPort and clientPort the ports that you choose, open two terminals at the same path where you cloned the repository and run the following commands:
 
 In the first terminal run the bandwidth server as follow:
 ```
@@ -95,10 +95,10 @@ cd scion-apps
 export SCION_DAEMON_ADDRESS=clientAddr:clientPort
 sudo -E go run bwtester/bwtestclient/bwtestclient.go -s servAddrIPV6,[servAddrIPV4]:servPort -cs 1Mbps
 ```
-### Setting rate limit
+### Setting rate limits
 Once the network is running, rate limits can be set by using the script located in go/scriptRL/main.go.
 The script takes the following argument:
-* -s which is the IPV4 address of the AS that performs the monitoring
+* -s which is the IPV4 address of the border router that performs the rate limiter
 * -address which specifies the IPV6 address of the AS on which the rate limit is set
 * -ingress the ID of the ingress on which the rate limit is performed
 * -egress the ID of the egress on which the rate limit is performed
